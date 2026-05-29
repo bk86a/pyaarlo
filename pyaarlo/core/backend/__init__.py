@@ -107,10 +107,10 @@ class ArloBackEnd:
             self._debug("created new user ID")
             self._req.details.device_id = str(uuid.uuid4())
 
-    def _debug(self, msg):
+    def _debug(self, msg: str) -> None:
         self._log.debug(f"backend: {msg}")
 
-    def _vdebug(self, msg):
+    def _vdebug(self, msg: str) -> None:
         self._log.vdebug(f"backend: {msg}")
 
     def _event_run_callbacks(self, response):
@@ -940,8 +940,9 @@ class ArloBackEnd:
             count = 0
             while not self._event.stream_connected and count < 30:
                 self._debug("waiting for stream up")
-                self._lock.wait(1)
+                _ = self._lock.wait(1)
                 count += 1
+        # XXX: check count and fail?
 
         # start logout daemon for sse clients
         # if self._cfg.reconnect_every != 0:

@@ -3,6 +3,7 @@ import pickle
 import os
 import pprint
 import threading
+from typing import Union
 
 from .cfg import ArloCfg
 from .logger import ArloLogger
@@ -14,7 +15,7 @@ class ArloStorage:
         self._cfg: ArloCfg = cfg
         self._log: ArloLogger = log
 
-        self._state_file: str = self._cfg.state_file
+        self._state_file: Union[str, None] = self._cfg.state_file
         self._lock: threading.Lock = threading.Lock()
         self._db = {}
 

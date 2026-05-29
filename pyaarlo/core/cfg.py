@@ -6,8 +6,8 @@ import os
 import re
 import random
 
-from typing import Any, Dict
-from urllib.parse import urlparse
+from typing import Dict, Union, cast
+from urllib.parse import urlparse, ParseResult
 
 from ..constant import (
     DEFAULT_AUTH_HOST,
@@ -34,7 +34,7 @@ class ArloCfg:
     """
 
 
-    def __init__(self, log: ArloLogger, **kwargs):
+    def __init__(self, log: ArloLogger, **kwargs: Union[str, int, bool]):
         """The constructor.
 
         Args:
@@ -42,7 +42,7 @@ class ArloCfg:
         """
         self._log: ArloLogger = log
 
-        self._kw: Dict[str, Any] = kwargs
+        self._kw: Dict[str, Union[str, int, bool]] = kwargs
         self._update_backend: bool = False
         self._storage_dir: str
 
@@ -52,20 +52,20 @@ class ArloCfg:
         if strplatform == "Windows":
             self._storage_dir = os.path.join(tempfile.gettempdir(), ".aarlo")
         elif os.path.exists(termux_dir):
-            self._storage_dir = self._kw.get("storage_dir", os.path.join(termux_dir, ".aarlo"))
+            self._storage_dir = cast(str, self._kw.get("storage_dir", os.path.join(termux_dir, ".aarlo")))
         else:
-            self._storage_dir = self._kw.get("storage_dir", "/tmp/.aarlo")
+            self._storage_dir = cast(str, self._kw.get("storage_dir", "/tmp/.aarlo"))
 
         self._debug("loaded")
 
 
-    def _remove_scheme(self, host):
+    def _remove_scheme(self, host: str) -> str:
         bits = host.split("://")
         if len(bits) > 1:
             return bits[1]
         return host
 
-    def _add_scheme(self, host, scheme='https'):
+    def _add_scheme(self, host: str, scheme: str = 'https') -> str:
         if "://" in host:
             return host
         return f"{scheme}://{host}"
@@ -76,51 +76,51 @@ class ArloCfg:
     def _user_storage_file(self, suffix: str) -> str:
         return f"{self.storage_dir}/{self._email_to_dir(self.username)}.{suffix}"
 
-    def _debug(self, msg):
+    def _debug(self, msg: str):
         self._log.debug(f"cfg: {msg}")
 
     @property
-    def storage_dir(self):
+    def storage_dir(self) -> str:
         return self._storage_dir
 
     @property
-    def name(self):
-        return self._kw.get("name", "aarlo")
+    def name(self) -> str:
+        return cast(str, self._kw.get("name", "aarlo"))
 
     @property
-    def username(self):
-        return self._kw.get("username", "unknown")
+    def username(self) -> str:
+        return cast(str, self._kw.get("username", "unknown"))
 
     @property
-    def password(self):
-        return self._kw.get("password", "unknown")
+    def password(self) -> str:
+        return cast(str, self._kw.get("password", "unknown"))
 
     @property
-    def host(self):
-        return self._add_scheme(self._kw.get("host", DEFAULT_HOST), "https")
+    def host(self) -> str:
+        return self._add_scheme(cast(str, self._kw.get("host", DEFAULT_HOST)), "https")
 
     @property
     def auth_host(self):
-        return self._add_scheme(self._kw.get("auth_host", DEFAULT_AUTH_HOST), "https")
+        return self._add_scheme(cast(str, self._kw.get("auth_host", DEFAULT_AUTH_HOST)), "https")
 
     @property
     def mqtt_host(self):
-        return self._remove_scheme(self._kw.get("mqtt_host", MQTT_HOST))
+        return self._remove_scheme(cast(str, self._kw.get("mqtt_host", MQTT_HOST)))
 
     @property
-    def mqtt_port(self):
-        return self._kw.get("mqtt_port", DEFAULT_MQTT_PORT)
+    def mqtt_port(self) -> int:
+        return cast(int, self._kw.get("mqtt_port", DEFAULT_MQTT_PORT))
 
-    def update_mqtt_from_url(self, url):
+    def update_mqtt_from_url(self, url: Union[str, ParseResult]):
         if self._update_backend or self.event_backend == "auto":
             self._update_backend = True
-            url = urlparse(url)
+            url = urlparse(cast(str, url))
             if url.scheme == "wss":
                 self._kw["backend"] = 'sse'
             else:
                 self._kw["backend"] = 'mqtt'
-                self._kw["mqtt_host"] = url.hostname
-                self._kw["mqtt_port"] = url.port
+                self._kw["mqtt_host"] = cast(str, url.hostname)
+                self._kw["mqtt_port"] = cast(int, url.port)
 
     @property
     def mqtt_hostname_check(self):
@@ -151,8 +151,8 @@ class ArloCfg:
         return self._kw.get("request_timeout", 60)
 
     @property
-    def stream_timeout(self):
-        return self._kw.get("stream_timeout", 0)
+    def stream_timeout(self) -> int:
+        return cast(int, self._kw.get("stream_timeout", 0))
 
     @property
     def recent_time(self):
@@ -178,10 +178,10 @@ class ArloCfg:
         return self._kw.get("snapshot_checks", [])
 
     @property
-    def user_agent(self):
-        return self._kw.get("user_agent", "arlo")
+    def user_agent(self) -> str:
+        return cast(str, self._kw.get("user_agent", "arlo"))
 
-    def user_agent_string(self, agent=None):
+    def user_agent_string(self, agent: Union[str, None] = None) -> str:
         """Map `agent` to a user agent string.
 
         `!real-string` will use the provided string as-is, used when passing user agent
@@ -203,8 +203,8 @@ class ArloCfg:
         return USER_AGENTS.get(agent, USER_AGENTS["linux"])
 
     @property
-    def mode_api(self):
-        return self._kw.get("mode_api", "auto")
+    def mode_api(self) -> str:
+        return cast(str, self._kw.get("mode_api", "auto"))
 
     @property
     def refresh_devices_every(self):
@@ -231,8 +231,8 @@ class ArloCfg:
         return self._kw.get("tfa_source", TFA_CONSOLE_SOURCE)
 
     @property
-    def tfa_type(self):
-        return self._kw.get("tfa_type", TFA_EMAIL_TYPE).lower()
+    def tfa_type(self) -> str:
+        return cast(str, self._kw.get("tfa_type", TFA_EMAIL_TYPE)).lower()
 
     @property
     def tfa_delay(self):
@@ -252,16 +252,16 @@ class ArloCfg:
 
     @property
     def tfa_host(self):
-        host = self._remove_scheme(self._kw.get("tfa_host", TFA_DEFAULT_HOST))
+        host: str = self._remove_scheme(cast(str, self._kw.get("tfa_host", TFA_DEFAULT_HOST)))
         return host.split(":")[0]
 
-    def tfa_host_with_scheme(self, scheme="https"):
-        host = self._add_scheme(self._kw.get("tfa_host", TFA_DEFAULT_HOST), scheme)
+    def tfa_host_with_scheme(self, scheme: str = "https"):
+        host: str = self._add_scheme(cast(str, self._kw.get("tfa_host", TFA_DEFAULT_HOST)), scheme)
         return ":".join(host.split(":")[:2])
 
     @property
-    def tfa_port(self):
-        host = self._remove_scheme(self._kw.get("tfa_host", TFA_DEFAULT_HOST))
+    def tfa_port(self) -> int:
+        host = self._remove_scheme(cast(str, self._kw.get("tfa_host", TFA_DEFAULT_HOST)))
         bits = host.split(":")
         if len(bits) == 1:
             return 993
@@ -290,11 +290,11 @@ class ArloCfg:
         return self._kw.get("wait_for_initial_setup", True)
 
     @property
-    def save_state(self):
-        return self._kw.get("save_state", True)
+    def save_state(self) -> bool:
+        return cast(bool, self._kw.get("save_state", True))
 
     @property
-    def state_file(self):
+    def state_file(self) -> Union[str, None]:
         if self.save_state:
             return self.storage_dir + "/" + self.name + ".pickle"
         return None
@@ -322,8 +322,8 @@ class ArloCfg:
         return self._kw.get("library_days", PRELOAD_DAYS)
 
     @property
-    def synchronous_mode(self):
-        return self._kw.get("synchronous_mode", False)
+    def synchronous_mode(self) -> bool:
+        return cast(bool, self._kw.get("synchronous_mode", False))
 
     @property
     def user_stream_delay(self):
@@ -350,8 +350,8 @@ class ArloCfg:
         return self._kw.get("no_unicode_squash", True)
 
     @property
-    def event_backend(self):
-        return self._kw.get("backend", "auto")
+    def event_backend(self) -> str:
+        return cast(str, self._kw.get("backend", "auto"))
 
     @property
     def cipher_list(self):

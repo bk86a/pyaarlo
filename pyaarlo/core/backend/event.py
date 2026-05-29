@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import json 
 
 import paho.mqtt.client as mqtt
 import pprint
@@ -9,7 +9,7 @@ import requests
 import ssl
 import traceback
 from enum import IntEnum
-from typing import Any, Union
+from typing import Any, Union, Callable, List, Dict
 
 from ...constant import (
     MQTT_HOST,
@@ -33,7 +33,9 @@ class _EventState(IntEnum):
 class _EventSession:
 
     def __init__(self, cfg: ArloCfg, log: ArloLogger, details: ArloSessionDetails,
-                 event_handler: Any = None, connect_handler: Any = None, reconnect_handler: Any = None) -> None:
+                 event_handler: Callable[[Any], None],
+                 connect_handler: Callable[[], Dict[str, Any]],
+                 reconnect_handler: Callable[[], None]) -> None:
         self.cfg: ArloCfg = cfg
         self.log: ArloLogger = log
 
@@ -50,13 +52,13 @@ class _MQTT:
         self._client: Union[mqtt.Client, None] = None
         self._client_id: Union[str, None] = None
 
-    def _debug(self, msg):
+    def _debug(self, msg: str) -> None:
         self._session.log.debug(f"{msg}")
 
-    def _vdebug(self, msg):
+    def _vdebug(self, msg: str) -> None:
         self._session.log.vdebug(f"{msg}")
 
-    def _subscribe_devices(self, devices):
+    def _subscribe_devices(self, devices: List[Dict[str, Any]]):
         topics = []
         for device in devices:
             for topic in device.get("allowedMqttTopics", []):
@@ -151,7 +153,7 @@ class _MQTT:
                 )
             )
 
-    def update(self, **_kwargs):
+    def update(self, **_kwargs: Dict[str, Any]):
         pass
 
 
@@ -161,7 +163,7 @@ class _SSE:
         self._session: _EventSession = session
         self._stream: Union[SSEClient, None] = None
 
-    def _debug(self, msg):
+    def _debug(self, msg: str) -> None:
         self._session.log.debug(f"sse: {msg}")
 
     def stop(self):
@@ -233,7 +235,7 @@ class _SSE:
                 )
             )
 
-    def update(self, **kwargs):
+    def update(self, **_kwargs: Dict[str, Any]):
         pass
 
 
@@ -248,7 +250,9 @@ class ArloEvent:
     """
 
     def __init__(self, cfg: ArloCfg, log: ArloLogger, bg: ArloBackground, details: ArloSessionDetails,
-                 event_handler: Any = None, connect_handler: Any = None, reconnect_handler: Any = None):
+                 event_handler: Callable[[Any], None],
+                 connect_handler: Callable[[], Dict[str, Any]],
+                 reconnect_handler: Callable[[], None]):
         self._bg: ArloBackground = bg
 
         self._session: _EventSession = _EventSession(cfg, log, details, event_handler, connect_handler, reconnect_handler)
@@ -302,7 +306,7 @@ class ArloEvent:
         self._state = _EventState.STARTING
         self._device.stop()
 
-    def update(self, **kwargs):
+    def update(self, **kwargs: Dict[str, Any]):
         """Update the event stream.
 
         This is stream specific; for MQTT it will update subscriptions, for

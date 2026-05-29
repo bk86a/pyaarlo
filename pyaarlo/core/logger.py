@@ -21,7 +21,7 @@ class ArloLogger:
         self.debug("logger created")
         self.vdebug("verbose debug enabled")
 
-    def error(self, msg):
+    def error(self, msg: str) -> None:
         self._last_error = msg
         _LOGGER.error(msg)
 
@@ -31,15 +31,15 @@ class ArloLogger:
         """
         return self._last_error
 
-    def warning(self, msg):
+    def warning(self, msg: str) -> None:
         _LOGGER.warning(msg)
 
-    def info(self, msg):
+    def info(self, msg: str) -> None:
         _LOGGER.info(msg)
 
-    def debug(self, msg):
+    def debug(self, msg: str) -> None:
         _LOGGER.debug(msg)
 
-    def vdebug(self, msg):
+    def vdebug(self, msg: str) -> None:
         if self._verbose_debug:
             _LOGGER.debug(msg)

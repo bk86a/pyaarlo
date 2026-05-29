@@ -5,7 +5,7 @@ import datetime
 import pprint
 import threading
 import time
-from typing import Any, List, Union
+from typing import Any, List, Union, override
 
 from .constant import (
     BLANK_IMAGE,
@@ -199,7 +199,7 @@ class PyArlo:
         self._core.st.set(["ARLO", TOTAL_LIGHTS_KEY], len(self._objs.lights), prefix="aarlo")
 
         # Subscribe to events.
-        self._core.be.start()
+        _ = self._core.be.start()
 
         # Now ping the bases.
         self._ping_bases()
@@ -210,14 +210,15 @@ class PyArlo:
             with self._lock:
                 while not self._started:
                     self.debug("waiting for initial setup...")
-                    self._lock.wait(1)
+                    _ = self._lock.wait(1)
             self.debug("initial setup finished...")
 
         # Register house keeping cron jobs.
         self.debug("registering cron jobs")
-        self._core.bg.run_every(self._fast_refresh, FAST_REFRESH_INTERVAL)
-        self._core.bg.run_every(self._slow_refresh, SLOW_REFRESH_INTERVAL)
+        _ = self._core.bg.run_every(self._fast_refresh, FAST_REFRESH_INTERVAL)
+        _ = self._core.bg.run_every(self._slow_refresh, SLOW_REFRESH_INTERVAL)
 
+    @override
     def __repr__(self):
         # Representation string of object.
         return "<{0}: {1}>".format(self.__class__.__name__, self._core.cfg.name)
@@ -794,11 +795,13 @@ class PyArlo:
     def warning(self, msg):
         self._core.log.warning(msg)
 
-    def info(self, msg):
+    def info(self, msg: str) -> None:
         self._core.log.info(msg)
 
-    def debug(self, msg):
+    def debug(self, msg: str) -> None:
         self._core.log.debug(msg)
 
-    def vdebug(self, msg):
-        self._core.log.vdebug(msg)
+    def vdebug(self, msg: str) -> None:
+        if self._core.log is not None:
+            self._core.log.vdebug(msg)
+

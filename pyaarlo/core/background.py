@@ -1,6 +1,7 @@
 import threading
 import time
 import traceback
+from typing import Union
 
 from .logger import ArloLogger
 
@@ -19,14 +20,14 @@ class ArloBackgroundWorker(threading.Thread):
 
         self._log.debug("background: worker started")
 
-    def _next_id(self):
+    def _next_id(self) -> str:
         self._id += 1
         return str(self._id) + ":" + str(time.monotonic())
 
-    def _run_next(self):
+    def _run_next(self) -> Union[int, None]:
 
         # timeout in the future
-        timeout = int(time.monotonic() + 60)
+        timeout: int = int(time.monotonic() + 60)
 
         # go by priority...
         for prio in sorted(self._queue.keys()):
@@ -76,7 +77,7 @@ class ArloBackgroundWorker(threading.Thread):
                 if now < timeout:
                     self._lock.wait(timeout - now)
 
-    def queue_job(self, run_at, prio, job):
+    def queue_job(self, run_at, prio: int, job) -> str:
         self._log.debug(f"background: queue-job={job}")
         run_at = int(run_at)
         with self._lock:
@@ -141,14 +142,14 @@ class ArloBackground:
     def run_low_in(self, bg_cb, seconds, **kwargs):
         return self._run_in(bg_cb, 99, seconds, **kwargs)
 
-    def _run_every(self, bg_cb, prio, seconds, **kwargs):
+    def _run_every(self, bg_cb, prio, seconds, **kwargs) -> str:
         job = {"run_every": seconds, "callback": bg_cb, "args": kwargs}
         return self._worker.queue_job(time.monotonic() + seconds, prio, job)
 
     def run_high_every(self, bg_cb, seconds, **kwargs):
         return self._run_every(bg_cb, 10, seconds, **kwargs)
 
-    def run_every(self, bg_cb, seconds, **kwargs):
+    def run_every(self, bg_cb, seconds, **kwargs) -> str:
         return self._run_every(bg_cb, 40, seconds, **kwargs)
 
     def run_low_every(self, bg_cb, seconds, **kwargs):
