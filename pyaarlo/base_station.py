@@ -1,3 +1,4 @@
+import asyncio
 import pprint
 import time
 from datetime import datetime, timedelta
@@ -235,8 +236,7 @@ class ArloBaseStation(ArloDevice):
         """Returns the current mode."""
         return self._load(MODE_KEY, "unknown")
 
-    @mode.setter
-    def mode(self, mode_name):
+    async def set_mode(self, mode_name):
         """Set the base station mode.
 
         **Note:** Setting mode has been known to hang, method includes code to
@@ -284,7 +284,7 @@ class ArloBaseStation(ArloDevice):
             # Post change.
             self.debug(self.name + ":new-mode=" + mode_name + ",id=" + mode_id)
             if self._v1_modes:
-                self._core.be.notify(
+                await self._core.be.notify(
                     device_id=self.device_id,
                     xcloud_id=self.xcloud_id,
                     body={
@@ -299,7 +299,7 @@ class ArloBaseStation(ArloDevice):
                 # This code tried 3 times to set the mode with attempts to reload the devices between
                 # attempts to try and kick Arlo. In async mode the first set works in the current thread,
                 # subsequent ones run in the background. In sync mode it the same. Sorry.
-                def _set_mode_v2_cb(attempt):
+                async def _set_mode_v2_cb(attempt):
                     self.debug("v2 arming")
                     params = {
                         "activeAutomations": [
@@ -313,7 +313,7 @@ class ArloBaseStation(ArloDevice):
                     }
                     if attempt < 4:
                         tid = "(modes:{}|activeAutomations)".format(self.device_id)
-                        body = self._core.be.post(
+                        body = await self._core.be.post(
                             AUTOMATION_PATH,
                             params=params,
                             raw=True,
@@ -335,10 +335,10 @@ class ArloBaseStation(ArloDevice):
                         self.debug(
                             "Fetching device list (hoping this will fix arming/disarming)"
                         )
-                        self._core.be.devices()
+                        await self._core.be.devices()
                         if self._core.cfg.synchronous_mode:
                             self.debug("trying again, but synchronous")
-                            _set_mode_v2_cb(attempt=attempt + 1)
+                            await _set_mode_v2_cb(attempt=attempt + 1)
                         else:
                             self._core.bg.run(_set_mode_v2_cb, attempt=attempt + 1)
                         return
@@ -355,9 +355,9 @@ class ArloBaseStation(ArloDevice):
                         )
                     )
 
-                _set_mode_v2_cb(1)
+                await _set_mode_v2_cb(1)
             else:
-                self._core.be.notify(
+                await self._core.be.notify(
                     device_id=self.device_id,
                     xcloud_id=self.xcloud_id,
                     body={
@@ -372,28 +372,32 @@ class ArloBaseStation(ArloDevice):
                 "{0}: mode {1} is unrecognised".format(self.name, mode_name)
             )
 
-    def update_mode(self):
+    @mode.setter
+    def mode(self, mode_name):
+        """Set the base station mode (sync wrapper).
+        """
+        self._core.bg.run(self.set_mode, mode_name=mode_name)
+
+    async def update_mode(self):
         """Check and update the base's current mode."""
         now = time.monotonic()
-        with self._lock:
-            #  if now < self._last_update + MODE_UPDATE_INTERVAL:
-            #  self.debug('skipping an update')
-            #  return
-            self._last_update = now
+        # use bg worker's loop or handle locking if needed
+        self._last_update = now
 
         if not self._v3_modes:
-            data = self._core.be.get(AUTOMATION_PATH)
-            for mode in data:
-                if mode.get("uniqueId", "") == self.unique_id:
-                    self._set_mode_or_schedule(mode)
+            data = await self._core.be.get(AUTOMATION_PATH)
+            if data:
+                for mode in data:
+                    if mode.get("uniqueId", "") == self.unique_id:
+                        self._set_mode_or_schedule(mode)
 
-    def update_modes(self, initial=False):
+    async def update_modes(self, initial=False):
         """Get and update the available modes for the base."""
         if self._v1_modes:
             # Work around slow arlo connections.
             if initial and self._core.cfg.synchronous_mode:
-                time.sleep(5)
-            resp = self._core.be.notify(
+                await asyncio.sleep(5)
+            resp = await self._core.be.notify(
                 device_id=self.device_id,
                 xcloud_id=self.xcloud_id,
                 body={"action": "get", "resource": "modes", "publishResponse": False},
@@ -405,7 +409,7 @@ class ArloBaseStation(ArloDevice):
             else:
                 self._core.log.error("unable to read mode, try forcing v2")
         elif self._v2_modes:
-            modes = self._core.be.get(
+            modes = await self._core.be.get(
                 DEFINITIONS_PATH + "?uniqueIds={}".format(self.unique_id)
             )
             if modes is not None:
@@ -426,9 +430,9 @@ class ArloBaseStation(ArloDevice):
                 if curr_location is not None:
                     break
             if curr_location:
-                curr_location.update_mode()
+                await curr_location.update_mode()
 
-    def update_states(self):
+    async def update_states(self):
         """Get device state from 'old' style base stations.
         Most new devices return their state from the the devices URL but we
         need to query the original base stations for their child states.
@@ -436,7 +440,7 @@ class ArloBaseStation(ArloDevice):
         # Only do work on 'old' style base stations
         if self.device_type == 'basestation' or self.device_type == 'arlobridge':
             self.debug("updating state")
-            self._core.be.notify(
+            await self._core.be.notify(
                 device_id=self.device_id,
                 xcloud_id=self.xcloud_id,
                 body={
@@ -471,7 +475,7 @@ class ArloBaseStation(ArloDevice):
         """Returns the current siren state (`on` or `off`)."""
         return self._load(SIREN_STATE_KEY, "off")
 
-    def siren_on(self, duration=300, volume=8):
+    async def siren_on(self, duration=300, volume=8):
         """Turn base siren on.
 
         Does nothing if base doesn't support sirens.
@@ -491,13 +495,13 @@ class ArloBaseStation(ArloDevice):
             },
         }
         self.debug(str(body))
-        self._core.be.notify(
+        await self._core.be.notify(
             device_id=self.device_id,
             xcloud_id=self.xcloud_id,
             body=body
         )
 
-    def siren_off(self):
+    async def siren_off(self):
         """Turn base siren off.
 
         Does nothing if base doesn't support sirens.
@@ -509,22 +513,22 @@ class ArloBaseStation(ArloDevice):
             "properties": {"sirenState": "off"},
         }
         self.debug(str(body))
-        self._core.be.notify(
+        await self._core.be.notify(
             device_id=self.device_id,
             xcloud_id=self.xcloud_id,
             body=body
         )
 
-    def restart(self):
+    async def restart(self):
         params = {"deviceId": self.device_id}
         tid = "diagnostics:{}".format(self.device_id)
         if (
-            self._core.be.post(RESTART_PATH, params=params, tid=tid, wait_for=None)
+            await self._core.be.post(RESTART_PATH, params=params, tid=tid, wait_for=None)
             is None
         ):
             self.debug("RESTART didnt send")
 
-    def _ping_and_check_reply(self):
+    async def _ping_and_check_reply(self):
         body = {
             "action": "set",
             "resource": self._core.be.sub_id,
@@ -532,7 +536,7 @@ class ArloBaseStation(ArloDevice):
             "properties": {"devices": [self.device_id]},
         }
         self.debug("pinging {}".format(self.name))
-        if self._core.be.notify(
+        if await self._core.be.notify(
                 device_id=self.device_id,
                 xcloud_id=self.xcloud_id,
                 body=body,
@@ -556,17 +560,18 @@ class ArloBaseStation(ArloDevice):
         self.debug(f"supports {cap} is {supports}")
         return supports
 
-    def build_ratls(self, public=False):
+    async def build_ratls(self, public=False):
         self._ratls = ArloRatls(self._core, self, public=public)
+        await self._ratls.start()
 
-    def keep_ratls_open(self):
+    async def keep_ratls_open(self):
         if self._ratls:
             self.debug("refreshing ratls for {}".format(self.name))
-            self._ratls.open_port()
+            await self._ratls.open_port()
 
-    def build_media_library(self):
+    async def build_media_library(self):
         self._ml = ArloBaseStationMediaLibrary(self._core, self._objs, self)
-        self._ml.load()
+        await self._ml.load()
 
     @property
     def ml(self):
@@ -626,7 +631,7 @@ class ArloBaseStationMediaLibrary(ArloMediaLibrary):
 
         self._base = base
 
-    def _fetch_library(self, date_from, date_to):
+    async def _fetch_library(self, date_from, date_to):
         """Fetch the library from the device.
         """
         list = []
@@ -638,7 +643,7 @@ class ArloBaseStationMediaLibrary(ArloMediaLibrary):
             for camera in self._objs.cameras:
                 if camera.parent_id == self._base.device_id:
                     # This URL is mysterious -- it won't return multiple days of videos
-                    data = self._base.ratls.get(f"{RATLS_LIBRARY_PATH}/{date}/{date}/{camera.device_id}")
+                    data = await self._base.ratls.get(f"{RATLS_LIBRARY_PATH}/{date}/{date}/{camera.device_id}")
                     if data and "data" in data:
                         list += data["data"]
 

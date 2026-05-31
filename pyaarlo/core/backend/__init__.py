@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import pprint
 import re
 import threading
@@ -95,7 +96,7 @@ class ArloBackEnd:
         self._event: _EventDetails = _EventDetails()
 
         # Remaining state variables.
-        self._lock: threading.Condition = threading.Condition()
+        self._lock: threading.Lock = threading.Lock()
         self._dump_file = self._cfg.dump_file
         self._requests = {}
         self._callbacks = {}
@@ -222,11 +223,11 @@ class ArloBackEnd:
         for device_id, resource, response in responses:
             cbs = []
             self._debug("sending {} to {}".format(resource, device_id))
-            with self._lock:
-                if device_id and device_id in self._callbacks:
-                    cbs.extend(self._callbacks[device_id])
-                if "all" in self._callbacks:
-                    cbs.extend(self._callbacks["all"])
+            # Thread-safe read of callbacks
+            if device_id and device_id in self._callbacks:
+                cbs.extend(self._callbacks[device_id])
+            if "all" in self._callbacks:
+                cbs.extend(self._callbacks["all"])
             for cb in cbs:
                 self._bg.run(cb, resource=resource, event=response)
 
@@ -240,37 +241,42 @@ class ArloBackEnd:
         tid = response.get("transId", None)
         resource = response.get("resource", None)
         device_id = response.get("from", None)
-        with self._lock:
-            # Transaction ID
-            # Simple. We have a transaction ID, look for that. These are
-            # usually returned by notify requests.
-            if tid and tid in self._requests:
-                self._requests[tid] = response
-                self._lock.notify_all()
 
-            # Resource
-            # These are usually returned after POST requests. We trap these
-            # to make async calls sync.
-            if resource:
-                # Historical. We are looking for a straight matching resource.
-                if resource in self._requests:
-                    self._vdebug("{} found by text!".format(resource))
-                    self._requests[resource] = response
-                    self._lock.notify_all()
+        # Transaction ID
+        # Simple. We have a transaction ID, look for that. These are
+        # usually returned by notify requests.
+        if tid and tid in self._requests:
+            req = self._requests[tid]
+            req["response"] = response
+            req["event"].set()
 
+        # Resource
+        # These are usually returned after POST requests. We trap these
+        # to make async calls sync.
+        if resource:
+            # Historical. We are looking for a straight matching resource.
+            if resource in self._requests:
+                self._vdebug("{} found by text!".format(resource))
+                req = self._requests[resource]
+                req["response"] = response
+                req["event"].set()
+
+            else:
+                # Complex. We are looking for a resource and-or
+                # deviceid matching a regex.
+                if device_id:
+                    bounded_resource = "{}:{}".format(resource, device_id)
+                    self._vdebug("{} bounded device!".format(bounded_resource))
                 else:
-                    # Complex. We are looking for a resource and-or
-                    # deviceid matching a regex.
-                    if device_id:
-                        resource = "{}:{}".format(resource, device_id)
-                        self._vdebug("{} bounded device!".format(resource))
-                    for request in self._requests:
-                        if re.match(request, resource):
-                            self._vdebug(
-                                "{} found by regex {}!".format(resource, request)
-                            )
-                            self._requests[request] = response
-                            self._lock.notify_all()
+                    bounded_resource = resource
+
+                for request_pattern, req in self._requests.items():
+                    if re.match(request_pattern, bounded_resource):
+                        self._vdebug(
+                            "{} found by regex {}!".format(bounded_resource, request_pattern)
+                        )
+                        req["response"] = response
+                        req["event"].set()
 
     def _event_response_handler(self, response):
 
@@ -291,23 +297,34 @@ class ArloBackEnd:
         self._event_run_callbacks(response)
         
         # Notify any waiting post() calls.
-        self._event_notify_waiting(response)
+        # Use call_soon_threadsafe as this might be called from MQTT/SSE thread
+        try:
+            loop = asyncio.get_running_loop()
+            loop.call_soon_threadsafe(self._event_notify_waiting, response)
+        except RuntimeError:
+            if self._bg._loop:
+                self._bg._loop.call_soon_threadsafe(self._event_notify_waiting, response)
 
     def _event_connected_handler(self):
-        with self._lock:
-            self._event.stream_connected = True
-            self._lock.notify_all()
+        self._event.stream_connected = True
         self._debug("event connected")
+        # Devices refresh is now async. Since we're in a background thread (MQTT/SSE),
+        # we can bridge to the loop.
+        try:
+            if self._bg._loop:
+                devices = asyncio.run_coroutine_threadsafe(self.devices(), self._bg._loop).result(timeout=30)
+                return {"devices": devices}
+        except Exception as e:
+            self._debug(f"failed to get devices in connected handler: {str(e)}")
         return {
-            "devices": self.devices()
+            "devices": []
         }
 
     def _event_reconnected_handler(self):
         self._debug("event re-connected")
-        self.devices()
 
-    def _event_reconnect(self):
-        self._event.stream.stop()
+    async def _event_reconnect(self):
+        await self._event.stream.stop()
 
     def _event_loop_stop(self):
         self._event.loop_exiting = True
@@ -315,12 +332,16 @@ class ArloBackEnd:
     def _event_loop(self):
         """The event stream loop.
 
-        This is run inside its own thread. It's currently done inside the
-        `backend` directltly to simplify things.
-        XXX is simplifying?
-        XXX move to async one day...
+        This is run inside its own thread.
         """
         self._debug("re-logging in")
+
+        # Create a loop for this thread if it doesn't have one
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
 
         while not self._event.loop_exiting:
 
@@ -334,47 +355,44 @@ class ArloBackEnd:
             login_count = 0
             wait_time = 5
             while not self._logged_in:
-                with self._lock:
-                    self._lock.wait(wait_time)
+                time.sleep(wait_time)
                 # While testing; hold off for an hour if too many failures.
                 if login_count > 3:
                     wait_time = 360
                 self._debug(f"re-logging in with time={wait_time}")
-                self._logged_in = self._login() and self._session_finalize()
+                # We have to run the async login in the loop
+                self._logged_in = loop.run_until_complete(self._login()) and loop.run_until_complete(self._session_finalize())
 
             self._debug("starting event device")
-            self._event.stream.run()
+            loop.run_until_complete(self._event.stream.run())
             self._debug("exited event device")
 
             # clear down and signal out
-            with self._lock:
-                self._client_connected = False
-                self._requests = {}
-                self._lock.notify_all()
+            self._requests = {}
 
             # restart login...
             self._logged_in = False
 
-    def _auth_post(self, path, params=None, headers=None, raw=False, timeout=None, cookies=None):
-        return self._req.request_tuple(
+    async def _auth_post(self, path, params=None, headers=None, raw=False, timeout=None, cookies=None):
+        return await self._req.request_tuple(
             path, "POST", params, headers, False, raw, timeout, self._cfg.auth_host, authpost=True, cookies=cookies
         )
 
-    def _auth_get(
+    async def _auth_get(
             self, path, params=None, headers=None, stream=False, raw=False, timeout=None, cookies=None
     ):
-        return self._req.request_tuple(
+        return await self._req.request_tuple(
             path, "GET", params, headers, stream, raw, timeout, self._cfg.auth_host, authpost=True, cookies=cookies
         )
 
-    def _auth_options(
+    async def _auth_options(
             self, path, headers=None, timeout=None
     ):
-        return self._req.request(
+        return await self._req.request(
             path, "OPTIONS", None, headers, False, False, timeout, self._cfg.auth_host, authpost=True
         )
 
-    def _auth_find_factor_id(self) -> Union[str, None]:
+    async def _auth_find_factor_id(self) -> Union[str, None]:
         """Get list of suitable 2fa options.
 
         Then look at the user config and figure out which one is best
@@ -383,7 +401,7 @@ class ArloBackEnd:
         self._debug("auth: finding factor id")
 
         # Get a list of factors to use.
-        code, factors = self._auth_get(
+        code, factors = await self._auth_get(
             f"{AUTH_GET_FACTORS}?data = {int(time.time())}", {
             },
             self._auth.headers
@@ -411,7 +429,7 @@ class ArloBackEnd:
         self._log.error("login failed: 2fa: no secondary choices available")
         return None
 
-    def _auth_trust_browser(self) -> _AuthState:
+    async def _auth_trust_browser(self) -> _AuthState:
         """Trust the device.
 
         If this is a new authentication we tell Arlo to trust this browser. Arlo
@@ -431,7 +449,7 @@ class ArloBackEnd:
             return _AuthState.SUCCESS
 
         # Start the pairing.
-        code, body = self._auth_post(
+        code, body = await self._auth_post(
             AUTH_START_PAIRING, {
                 "factorAuthCode": self._auth.browser_code,
                 "factorData": "",
@@ -447,7 +465,7 @@ class ArloBackEnd:
         self._debug("auth: pairing succeeded")
         return _AuthState.SUCCESS
 
-    def _auth_validate(self) -> _AuthState:
+    async def _auth_validate(self) -> _AuthState:
         """Validate the token we have.
 
         Make sure the token we have is still good.
@@ -457,7 +475,7 @@ class ArloBackEnd:
         # Update the token in the header to the new token.
         self._auth.headers["Authorization"] = self._req.details.token64
 
-        code, validated = self._auth_get(
+        code, validated = await self._auth_get(
             f"{AUTH_VALIDATE_PATH}?data = {int(time.time())}", {
             },
             self._auth.headers
@@ -468,7 +486,7 @@ class ArloBackEnd:
 
         return _AuthState.TRUST_BROWSER
 
-    def _auth_new_auth(self) -> _AuthState:
+    async def _auth_new_auth(self) -> _AuthState:
         """We have to authenticate again.
 
         There are several steps to this:
@@ -483,7 +501,7 @@ class ArloBackEnd:
         self._debug("auth: start new auth")
 
         # Find a factor ID to use
-        self._auth.factor_id = self._auth_find_factor_id()
+        self._auth.factor_id = await self._auth_find_factor_id()
         if self._auth.factor_id is None:
             return _AuthState.FAILED
         self._debug(f"using factor id {self._auth.factor_id}")
@@ -494,8 +512,8 @@ class ArloBackEnd:
         self._auth.tfa_handler = ArloTFA(self._cfg, self._log)
 
         # Start authentication to send out code. Stop if this fails.
-        self._auth_options(AUTH_START_PATH, self._auth.headers)
-        code, body = self._auth_post(
+        await self._auth_options(AUTH_START_PATH, self._auth.headers)
+        code, body = await self._auth_post(
             AUTH_START_PATH, {
                 "factorId": self._auth.factor_id,
                 "factorType": self._auth.tfa_handler.factor_type,
@@ -512,8 +530,7 @@ class ArloBackEnd:
         factor_auth_code = body["factorAuthCode"]
 
         # Get otp.
-        # XXX this can be a retry?
-        otp = self._auth.tfa_handler.code()
+        otp = await asyncio.get_running_loop().run_in_executor(None, self._auth.tfa_handler.code)
         self._auth.tfa_handler.stop()
 
         if otp is None:
@@ -533,7 +550,7 @@ class ArloBackEnd:
         while True:
             # finish authentication
             self._debug(f"finishing auth attempt #{tries}")
-            code, body = self._auth_post(
+            code, body = await self._auth_post(
                 AUTH_FINISH_PATH,
                 payload,
                 self._auth.headers
@@ -557,13 +574,13 @@ class ArloBackEnd:
 
             # Loop again.
             self._log.warning(f"2fa finishAuth - tries {tries}")
-            time.sleep(self._cfg.tfa_delay)
+            await asyncio.sleep(self._cfg.tfa_delay)
             tries += 1
 
         self._log.error(f"login failed: finish failed: {code} - {body}")
         return _AuthState.FAILED
 
-    def _auth_trusted_auth(self) -> _AuthState:
+    async def _auth_trusted_auth(self) -> _AuthState:
         """Arlo still trusts us.
 
         Send back the factor id that was passed. We have a cookie - browser_trust_* -
@@ -571,8 +588,8 @@ class ArloBackEnd:
         """
         self._debug("auth: start trusted auth")
 
-        self._auth_options(AUTH_START_PATH, self._auth.headers)
-        code, body = self._auth_post(
+        await self._auth_options(AUTH_START_PATH, self._auth.headers)
+        code, body = await self._auth_post(
             AUTH_START_PATH, {
                 "factorId": self._auth.factor_id,
                 "factorType": "BROWSER",
@@ -596,7 +613,7 @@ class ArloBackEnd:
         else:
             return _AuthState.VALIDATE_TOKEN
 
-    def _auth_current_factor_id(self) -> _AuthState:
+    async def _auth_current_factor_id(self) -> _AuthState:
         """Get the current factor id
 
         If we have paired this "device" with Arlo before it will return an ID
@@ -609,8 +626,8 @@ class ArloBackEnd:
 
         # Retrieve current factor ID. If we have previously trusted this
         # "browser" we will be able to skip the 2fa section.
-        self._auth_options(AUTH_GET_FACTORID, self._auth.headers)
-        code, body = self._auth_post(
+        await self._auth_options(AUTH_GET_FACTORID, self._auth.headers)
+        code, body = await self._auth_post(
             AUTH_GET_FACTORID, {
                 "factorType": "BROWSER",
                 "factorData": "",
@@ -676,7 +693,7 @@ class ArloBackEnd:
 
         return False
 
-    def _auth_revalidate_token(self) -> _AuthState:
+    async def _auth_revalidate_token(self) -> _AuthState:
         """See if we can skip auth by re-using the old token.
         """
         self._debug("auth: revalidating token")
@@ -700,19 +717,19 @@ class ArloBackEnd:
             self._auth.headers["Authorization"] = self._req.details.token64
 
             # Try the current token.
-            state = self._auth_validate()
+            state = await self._auth_validate()
             if state != _AuthState.FAILED:
                 self._debug("auth: testing ok")
                 return _AuthState.SUCCESS
 
             # Don't try too hard.
-            time.sleep(3)
+            await asyncio.sleep(3)
 
         # Login...
         # Maybe reset here...
         return _AuthState.LOGIN
 
-    def _auth_login(self) -> _AuthState:
+    async def _auth_login(self) -> _AuthState:
         """Perform the actual login.
 
         This is when username and password get used. In an attempt to bypass
@@ -727,8 +744,8 @@ class ArloBackEnd:
             self._auth.headers = self._req.auth_headers()
 
             # Attempt the auth.
-            self._auth_options(AUTH_PATH, self._auth.headers)
-            code, body = self._auth_post(
+            await self._auth_options(AUTH_PATH, self._auth.headers)
+            code, body = await self._auth_post(
                 AUTH_PATH, {
                     "email": self._cfg.username,
                     "password": to_b64(self._cfg.password),
@@ -760,7 +777,7 @@ class ArloBackEnd:
             self._log.error(f"login failed: {code} - possible cloudflare issue")
 
             # Don't try too hard.
-            time.sleep(3)
+            await asyncio.sleep(3)
 
         # Here means we're out of retries so stop now.
         self._log.error(f"login failed: no more curves - possible cloudflare issue")
@@ -781,7 +798,7 @@ class ArloBackEnd:
 
         return _AuthState.REVALIDATE_TOKEN
 
-    def _login(self):
+    async def _login(self):
         """Perform all the steps to authenticate against the Arlo servers.
         """
 
@@ -795,19 +812,19 @@ class ArloBackEnd:
             if self._auth.state == _AuthState.STARTING:
                 self._auth.state = self._auth_starting()
             if self._auth.state == _AuthState.REVALIDATE_TOKEN:
-                self._auth.state = self._auth_revalidate_token()
+                self._auth.state = await self._auth_revalidate_token()
             if self._auth.state == _AuthState.LOGIN:
-                self._auth.state = self._auth_login()
+                self._auth.state = await self._auth_login()
             if self._auth.state == _AuthState.CURRENT_FACTOR_ID:
-                self._auth.state = self._auth_current_factor_id()
+                self._auth.state = await self._auth_current_factor_id()
             if self._auth.state == _AuthState.TRUSTED_AUTH:
-                self._auth.state = self._auth_trusted_auth()
+                self._auth.state = await self._auth_trusted_auth()
             if self._auth.state == _AuthState.NEW_AUTH:
-                self._auth.state = self._auth_new_auth()
+                self._auth.state = await self._auth_new_auth()
             if self._auth.state == _AuthState.VALIDATE_TOKEN:
-                self._auth.state = self._auth_validate()
+                self._auth.state = await self._auth_validate()
             if self._auth.state == _AuthState.TRUST_BROWSER:
-                self._auth.state = self._auth_trust_browser()
+                self._auth.state = await self._auth_trust_browser()
 
         self._debug(f"auth: login exit state: {self._auth.state}")
         if self._auth.state != _AuthState.SUCCESS:
@@ -828,7 +845,7 @@ class ArloBackEnd:
         self._req.details.connection.headers.update(self._req.headers())
         return True
 
-    def _session_v3_details(self) -> bool:
+    async def _session_v3_details(self) -> bool:
         """Read in the v3 session details.
 
         This provides us with the following information:
@@ -837,7 +854,7 @@ class ArloBackEnd:
         """
         self._debug("session: getting v3 details")
 
-        v3_session = self.get(SESSION_PATH)
+        v3_session = await self.get(SESSION_PATH)
         if v3_session is None:
             self._log.error("v3 session failed")
             return False
@@ -854,15 +871,15 @@ class ArloBackEnd:
         # Always good if the v3 read works.
         return True
 
-    def _session_finalize(self) -> bool:
+    async def _session_finalize(self) -> bool:
         """Set up for the post authentication phase.
 
         Update the connection headers to include the latest auth token and
         work out some important pieces of the user setup.
         """
-        return self._session_connection() and self._session_v3_details()
+        return self._session_connection() and await self._session_v3_details()
 
-    def _notify(self, device_id, xcloud_id, body, trans_id=None):
+    async def _notify(self, device_id, xcloud_id, body, trans_id=None):
         if trans_id is None:
             trans_id = self.gen_trans_id()
 
@@ -871,7 +888,7 @@ class ArloBackEnd:
             body["from"] = self._req.details.web_id
         body["transId"] = trans_id
 
-        response = self.post(
+        response = await self.post(
             NOTIFY_PATH + device_id,
             body,
             headers={
@@ -888,40 +905,36 @@ class ArloBackEnd:
         if tid is None:
             tid = self.gen_trans_id()
         self._vdebug("starting transaction-->{}".format(tid))
-        with self._lock:
-            self._requests[tid] = None
+        self._requests[tid] = {"event": asyncio.Event(), "response": None}
         return tid
 
-    def _wait_for_transaction(self, tid, timeout):
+    async def _wait_for_transaction(self, tid, timeout):
         if timeout is None:
             timeout = self._cfg.request_timeout
-        mnow = time.monotonic()
-        mend = mnow + timeout
 
         self._vdebug("finishing transaction-->{}".format(tid))
-        with self._lock:
-            try:
-                while mnow < mend and self._requests[tid] is None:
-                    self._lock.wait(mend - mnow)
-                    mnow = time.monotonic()
-                response = self._requests.pop(tid)
-            except KeyError as _e:
-                self._debug("got a key error")
-                response = None
+        try:
+            req = self._requests[tid]
+            await asyncio.wait_for(req["event"].wait(), timeout)
+            response = self._requests.pop(tid)["response"]
+        except (KeyError, asyncio.TimeoutError):
+            self._debug("got a key error or timeout")
+            self._requests.pop(tid, None)
+            response = None
         self._vdebug("finished transaction-->{}".format(tid))
         return response
 
     def gen_trans_id(self, trans_type=TRANSID_PREFIX):
         return trans_type + "!" + str(uuid.uuid4())
 
-    def connect(self):
+    async def connect(self):
         # Start the login
-        self._logged_in = self._login() and self._session_finalize()
+        self._logged_in = await self._login() and await self._session_finalize()
         if not self._logged_in:
             self._debug("failed to log in")
         return
 
-    def start(self):
+    async def start(self):
         # Build event details...
         self._event.stream = ArloEvent(self._cfg, self._log, self._bg, self._req.details,
                                        self._event_response_handler,
@@ -935,19 +948,13 @@ class ArloBackEnd:
         )
         self._event.loop_thread.daemon = True
 
-        with self._lock:
-            self._event.loop_thread.start()
-            count = 0
-            while not self._event.stream_connected and count < 30:
-                self._debug("waiting for stream up")
-                _ = self._lock.wait(1)
-                count += 1
+        self._event.loop_thread.start()
+        count = 0
+        while not self._event.stream_connected and count < 30:
+            self._debug("waiting for stream up")
+            await asyncio.sleep(1)
+            count += 1
         # XXX: check count and fail?
-
-        # start logout daemon for sse clients
-        # if self._cfg.reconnect_every != 0:
-        #     self._debug("automatically reconnecting")
-        #     self._bg.run_every(self._event_reconnect, self._cfg.reconnect_every)
 
         self._debug("stream up")
         return True
@@ -956,12 +963,12 @@ class ArloBackEnd:
     def is_connected(self):
         return self._logged_in
 
-    def stop(self):
+    async def stop(self):
         self._debug("trying to stop")
         self._event_loop_stop()
         if self._event.stream is not None:
-            self._event.stream.stop()
-        self.put(LOGOUT_PATH)
+            await self._event.stream.stop()
+        await self.put(LOGOUT_PATH)
 
     def check_token(self):
         """See if the token nearing its timeout.
@@ -975,7 +982,7 @@ class ArloBackEnd:
             self._event_reconnect()
         self._debug(f"check-token: token still good for {remaining} seconds")
 
-    def notify(self, device_id, xcloud_id, body, timeout=None, wait_for=None):
+    async def notify(self, device_id, xcloud_id, body, timeout=None, wait_for=None):
         """Send in a notification.
 
         Notifications are Arlo's way of getting stuff done - turn on a light, change base station mode,
@@ -1004,16 +1011,16 @@ class ArloBackEnd:
         if wait_for == "event":
             self._vdebug("notify+event running")
             tid = self._start_transaction()
-            self._notify(device_id, xcloud_id, body=body, trans_id=tid)
-            return self._wait_for_transaction(tid, timeout)
+            await self._notify(device_id, xcloud_id, body=body, trans_id=tid)
+            return await self._wait_for_transaction(tid, timeout)
         elif wait_for == "response":
             self._vdebug("notify+response running")
-            return self._notify(device_id, xcloud_id, body=body)
+            return await self._notify(device_id, xcloud_id, body=body)
         else:
             self._vdebug("notify+sent")
             self._bg.run(self._notify, device_id=device_id, xcloud_id=xcloud_id, body=body)
 
-    def get(
+    async def get(
             self,
             path,
             params=None,
@@ -1027,7 +1034,7 @@ class ArloBackEnd:
     ):
         if wait_for == "response":
             self._vdebug("get+response running")
-            return self._req.request(
+            return await self._req.request(
                 path, "GET", params, headers, stream, raw, timeout, host, cookies
             )
         else:
@@ -1036,7 +1043,7 @@ class ArloBackEnd:
                 self._req.request, path=path, method="GET", params=params, headers=headers, stream=stream, raw=raw, timeout=timeout, host=host
             )
 
-    def put(
+    async def put(
             self,
             path,
             params=None,
@@ -1048,14 +1055,14 @@ class ArloBackEnd:
     ):
         if wait_for == "response":
             self._vdebug("put+response running")
-            return self._req.request(path, "PUT", params, headers, False, raw, timeout, cookies)
+            return await self._req.request(path, "PUT", params, headers, False, raw, timeout, cookies)
         else:
             self._vdebug("put sent")
             self._bg.run(
                 self._req.request, path=path, method="PUT", params=params, headers=headers, stream=False, raw=raw, timeout=timeout
             )
 
-    def post(
+    async def post(
             self,
             path,
             params=None,
@@ -1065,17 +1072,6 @@ class ArloBackEnd:
             tid=None,
             wait_for="response"
     ):
-        """Post a request to the Arlo servers.
-
-        Posts are used to retrieve data from the Arlo servers. Mostly. They are also used to change
-        base station modes.
-
-        The default mode of operation is to wait for a response from the http request. The `wait_for`
-        variable can change the operation. Setting it to `response` waits for a http response.
-        Setting it to `resource` waits for the resource in the `params` parameter to appear in the event
-        stream. Setting it to `nothing` causing the post to run in the background. Setting it to `None`
-        uses `resource` in synchronous mode and `response` in asynchronous mode.
-        """
         if wait_for is None:
             wait_for = "resource" if self._cfg.synchronous_mode else "response"
 
@@ -1084,11 +1080,11 @@ class ArloBackEnd:
             if tid is None:
                 tid = list(params.keys())[0]
             tid = self._start_transaction(tid)
-            self._req.request(path, "POST", params, headers, False, raw, timeout)
-            return self._wait_for_transaction(tid, timeout)
+            await self._req.request(path, "POST", params, headers, False, raw, timeout)
+            return await self._wait_for_transaction(tid, timeout)
         if wait_for == "response":
             self._vdebug("post+response running")
-            return self._req.request(path, "POST", params, headers, False, raw, timeout)
+            return await self._req.request(path, "POST", params, headers, False, raw, timeout)
         else:
             self._vdebug("post sent")
             self._bg.run(
@@ -1129,9 +1125,13 @@ class ArloBackEnd:
     def del_listener(self, device, callback):
         pass
 
-    def devices(self):
-        return self.get(f"{DEVICES_PATH}?t={time_to_arlotime()}")
+    async def devices(self):
+        return await self.get(f"{DEVICES_PATH}?t={time_to_arlotime()}")
 
     def ev_inject(self, response):
         self._event_run_callbacks(response)
+
+
+
+
 

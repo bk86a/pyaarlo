@@ -97,12 +97,10 @@ class ArloDoorBell(ArloChildDevice):
         self.debug(f"supports {cap} is {supports}")
         return supports
 
-    def update_silent_mode(self):
+    async def update_silent_mode(self):
         """Requests the latest silent mode settings.
-
-        Queues a job that requests the info from Arlo.
         """
-        self._core.be.notify(
+        await self._core.be.notify(
             device_id=self.base_station.device_id,
             xcloud_id=self.base_station.xcloud_id,
             body={
@@ -118,7 +116,7 @@ class ArloDoorBell(ArloChildDevice):
             chimes[chime] = on_or_off
         return chimes
 
-    def _silence(self, active, calls, chimes):
+    async def _silence(self, active, calls, chimes):
 
         # Build settings
         silence_settings = {
@@ -133,7 +131,7 @@ class ArloDoorBell(ArloChildDevice):
         self.debug(self.name + " silence is " + str(properties))
 
         # Send out request.
-        response = self._core.be.notify(
+        response = await self._core.be.notify(
             device_id=self.base_station.device_id,
             xcloud_id=self.base_station.xcloud_id,
             body={
@@ -147,23 +145,19 @@ class ArloDoorBell(ArloChildDevice):
 
         # Not none means a 200 so we assume it works until told otherwise.
         if response is not None:
-            self._core.bg.run(
-                self._save_and_do_callbacks,
-                attr=SILENT_MODE_KEY,
-                value=silence_settings,
-            )
+            self._save_and_do_callbacks(SILENT_MODE_KEY, silence_settings)
 
     def silence_off(self):
-        self._silence(False, False, {})
+        self._core.bg.run(self._silence, active=False, calls=False, chimes={})
 
     def silence_on(self):
-        self._silence(True, True, self._build_chimes(True))
+        self._core.bg.run(self._silence, active=True, calls=True, chimes=self._build_chimes(True))
 
     def silence_chimes(self):
-        self._silence(True, False, self._build_chimes(True))
+        self._core.bg.run(self._silence, active=True, calls=False, chimes=self._build_chimes(True))
 
     def silence_calls(self):
-        self._silence(True, True, self._build_chimes(False))
+        self._core.bg.run(self._silence, active=True, calls=True, chimes=self._build_chimes(False))
 
     @property
     def is_silenced(self):
@@ -188,7 +182,7 @@ class ArloDoorBell(ArloChildDevice):
     def siren_state(self):
         return self._load(SIREN_STATE_KEY, "off")
 
-    def siren_on(self, duration=300, volume=8):
+    async def siren_on(self, duration=300, volume=8):
         """Turn camera siren on.
 
         Does nothing if camera doesn't support sirens.
@@ -207,13 +201,13 @@ class ArloDoorBell(ArloChildDevice):
                 "pattern": "alarm",
             },
         }
-        self._core.be.notify(
+        await self._core.be.notify(
             device_id=self.device_id,
             xcloud_id=self.xcloud_id,
             body=body
         )
 
-    def siren_off(self):
+    async def siren_off(self):
         """Turn camera siren off.
 
         Does nothing if camera doesn't support sirens.
@@ -224,7 +218,7 @@ class ArloDoorBell(ArloChildDevice):
             "publishResponse": True,
             "properties": {"sirenState": "off"},
         }
-        self._core.be.notify(
+        await self._core.be.notify(
             device_id=self.device_id,
             xcloud_id=self.xcloud_id,
             body=body

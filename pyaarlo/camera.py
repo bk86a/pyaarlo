@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import pprint
 import threading
@@ -56,7 +57,7 @@ from .constant import (
 from .core import ArloCore
 from .child_device import ArloChildDevice
 from .objects import ArloObjects
-from .utils import http_get, http_get_img, the_epoch
+from .utils import http_get, http_get_img, the_epoch, http_get_img_async, http_get_async
 from .capabilities import ArloCapabilities
 
 
@@ -137,7 +138,7 @@ class ArloCamera(ArloChildDevice):
         )
 
     # Media library has updated, reload today's events.
-    def _update_from_media_library(self):
+    async def _update_from_media_library(self):
         self.debug("reloading cache for " + self._name)
         count, videos = self._objs.ml.videos_for(self)
         if videos:
@@ -189,9 +190,9 @@ class ArloCamera(ArloChildDevice):
                 self.debug("image already done for " + self.name)
 
     # Update last captured image.
-    def _update_image_from_capture(self):
+    async def _update_image_from_capture(self):
         # Get image and date, if fails ignore
-        img, date = http_get_img(self._load(LAST_IMAGE_KEY, None))
+        img, date = await http_get_img_async(self._load(LAST_IMAGE_KEY, None))
         if img is None:
             self.debug("failed to load image for " + self.name)
             return
@@ -199,18 +200,18 @@ class ArloCamera(ArloChildDevice):
         # Always make this the latest thumbnail image.
         if self._snapshot_time < date:
             self._snapshot_time = date
-            date = date.strftime(self._core.cfg.last_format)
-            self.debug(f"updating image for {self.name} ({date})")
-            self._save_and_do_callbacks(LAST_IMAGE_SRC_KEY, "capture/" + date)
+            date_str = date.strftime(self._core.cfg.last_format)
+            self.debug(f"updating image for {self.name} ({date_str})")
+            self._save_and_do_callbacks(LAST_IMAGE_SRC_KEY, "capture/" + date_str)
             self._save_and_do_callbacks(LAST_IMAGE_DATA_KEY, img)
         else:
-            date = date.strftime(self._core.cfg.last_format)
-            self.vdebug(f"ignoring image for {self.name} ({date})")
+            date_str = date.strftime(self._core.cfg.last_format)
+            self.vdebug(f"ignoring image for {self.name} ({date_str})")
 
     # Update the last snapshot
-    def _update_image_from_snapshot(self, ignore_date=False):
+    async def _update_image_from_snapshot(self, ignore_date=False):
         # Get image and date, if fails ignore.
-        img, date = http_get_img(self._load(SNAPSHOT_KEY, None), ignore_date)
+        img, date = await http_get_img_async(self._load(SNAPSHOT_KEY, None), ignore_date)
         if img is None:
             self.debug("failed to load snapshot for " + self.name)
             return
@@ -218,14 +219,14 @@ class ArloCamera(ArloChildDevice):
         # Always make this the latest snapshot image.
         if self._snapshot_time < date:
             self._snapshot_time = date
-            date = date.strftime(self._core.cfg.last_format)
-            self.debug(f"updating snapshot for {self.name} ({date})")
-            self._save_and_do_callbacks(LAST_IMAGE_SRC_KEY, "snapshot/" + date)
+            date_str = date.strftime(self._core.cfg.last_format)
+            self.debug(f"updating snapshot for {self.name} ({date_str})")
+            self._save_and_do_callbacks(LAST_IMAGE_SRC_KEY, "snapshot/" + date_str)
             self._save_and_do_callbacks(LAST_IMAGE_DATA_KEY, img)
             self._stop_snapshot()
         else:
-            date = date.strftime(self._core.cfg.last_format)
-            self.vdebug(f"ignoring snapshot for {self.name} ({date})")
+            date_str = date.strftime(self._core.cfg.last_format)
+            self.vdebug(f"ignoring snapshot for {self.name} ({date_str})")
 
     def _set_recent(self, timeo):
         with self._lock:
@@ -286,9 +287,9 @@ class ArloCamera(ArloChildDevice):
             self._dump_activities("_event::idle")
             self._lock.notify_all()
 
-    def _stop_activity(self):
+    async def _stop_activity(self):
         """Request the camera stop whatever it is doing and return to the idle state."""
-        response = self._core.be.notify(
+        response = await self._core.be.notify(
             device_id=self.base_station.device_id,
             xcloud_id=self.base_station.xcloud_id,
             body={
@@ -302,7 +303,7 @@ class ArloCamera(ArloChildDevice):
         if response is not None:
             self._mark_as_idle()
 
-    def _get_stream_url(self, starting_for, user_agent=None):
+    async def _get_stream_url(self, starting_for, user_agent=None):
         """Getting the stream URL without starting local streaming."""
         body = {
             "action": "get",
@@ -321,7 +322,7 @@ class ArloCamera(ArloChildDevice):
         if user_agent is not None:
             headers["User-Agent"] = self._core.cfg.user_agent_string(user_agent)
 
-        self._stream_url = self._core.be.post(STREAM_START_PATH, body, headers=headers)
+        self._stream_url = await self._core.be.post(STREAM_START_PATH, body, headers=headers)
         if self._stream_url is not None:
             if not self.has_any_local_users:
                 with self._lock:
@@ -334,7 +335,7 @@ class ArloCamera(ArloChildDevice):
             self.debug(f"No stream url for {self.name}")
         return self._stream_url
 
-    def _start_stream(self, starting_for, user_agent=None):
+    async def _start_stream(self, starting_for, user_agent=None):
         with self._lock:
             # Already streaming. Update sub-activity as needed.
             if self.has_any_local_users:
@@ -366,7 +367,7 @@ class ArloCamera(ArloChildDevice):
         if user_agent is not None:
             headers["User-Agent"] = self._core.cfg.user_agent_string(user_agent)
 
-        self._stream_url = self._core.be.post(STREAM_START_PATH, body, headers=headers)
+        self._stream_url = await self._core.be.post(STREAM_START_PATH, body, headers=headers)
         if self._stream_url is not None:
             self._stream_url = self._stream_url["url"].replace("rtsp://", "rtsps://")
             self.debug("url={}".format(self._stream_url))
@@ -375,13 +376,13 @@ class ArloCamera(ArloChildDevice):
                 self._local_users = set()
         return self._stream_url
 
-    def _stop_stream(self, stopping_for="streaming"):
+    async def _stop_stream(self, stopping_for="streaming"):
         with self._lock:
             self._local_users.discard(stopping_for)
             self._dump_activities("_stop_stream")
             if self.has_any_local_users:
                 return
-        self._stop_activity()
+        await self._stop_activity()
 
     def _event_handler(self, resource, event):
         self.debug(self.name + " CAMERA got one " + resource)
@@ -725,7 +726,7 @@ class ArloCamera(ArloChildDevice):
     def min_days_vdo_cache(self, value):
         self._min_days_vdo_cache = value
 
-    def update_media(self, wait=None):
+    async def update_media(self, wait=None):
         """Requests latest list of recordings from the backend server.
 
         :param wait if True then wait for completion, if False then don't wait,
@@ -737,12 +738,12 @@ class ArloCamera(ArloChildDevice):
             wait = self._core.cfg.synchronous_mode
         if wait:
             self.debug("doing media update")
-            self._update_from_media_library()
+            await self._update_from_media_library()
         else:
             self.debug("queueing media update")
             self._core.bg.run_low(self._update_from_media_library)
 
-    def update_last_image(self, wait=None):
+    async def update_last_image(self, wait=None):
         """Requests last thumbnail from the backend server.
 
         :param wait if True then wait for completion, if False then don't wait,
@@ -754,18 +755,16 @@ class ArloCamera(ArloChildDevice):
             wait = self._core.cfg.synchronous_mode
         if wait:
             self.debug("doing image update")
-            self._update_image_from_capture()
+            await self._update_image_from_capture()
         else:
             self.debug("queueing image update")
             self._core.bg.run_low(self._update_image_from_capture)
 
-    def update_ambient_sensors(self):
+    async def update_ambient_sensors(self):
         """Requests the latest temperature, humidity and air quality settings.
-
-        Queues a job that requests the info from Arlo.
         """
         if self.model_id == MODEL_BABY:
-            self._core.be.notify(
+            await self._core.be.notify(
                 device_id=self.base_station.device_id,
                 xcloud_id=self.base_station.xcloud_id,
                 body={
@@ -777,21 +776,20 @@ class ArloCamera(ArloChildDevice):
                 },
             )
 
-    def _take_streaming_snapshot(self):
+    async def _take_streaming_snapshot(self):
         body = {
             "xcloudId": self.xcloud_id,
             "parentId": self.parent_id,
             "deviceId": self.device_id,
             "olsonTimeZone": self.timezone,
         }
-        self._core.bg.run(
-            self._core.be.post,
+        await self._core.be.post(
             path=STREAM_SNAPSHOT_PATH,
             params=body,
             headers={"xcloudId": self.xcloud_id},
         )
 
-    def _take_idle_snapshot(self):
+    async def _take_idle_snapshot(self):
         body = {
             "action": "set",
             "from": self.web_id,
@@ -801,20 +799,13 @@ class ArloCamera(ArloChildDevice):
             "to": self.parent_id,
             "transId": self._core.be.gen_trans_id(),
         }
-        self._core.bg.run(
-            self._core.be.post,
+        await self._core.be.post(
             path=IDLE_SNAPSHOT_PATH,
             params=body,
             headers={"xcloudId": self.xcloud_id},
         )
 
-    def request_snapshot(self):
-        """Requests a snapshot from the camera without blocking.
-
-        The snapshot can be handled with callbacks registered to
-        LAST_IMAGE_SRC_KEY - lastImageSource starting with snapshot/, or capture/
-        LAST_IMAGE_DATA_KEY - presignedLastImageData containing the image data.
-        """
+    async def _request_snapshot(self):
         with self._lock:
             if self.has_user_request("snapshot"):
                 return
@@ -827,7 +818,7 @@ class ArloCamera(ArloChildDevice):
         if not snapshot_running:
             if stream_snapshot:
                 self.debug("streaming/recording snapshot")
-                self._take_streaming_snapshot()
+                await self._take_streaming_snapshot()
                 if self._core.cfg.stream_snapshot_stop > 0:
                     self.debug(
                         "queing stream stop in {}".format(
@@ -841,7 +832,7 @@ class ArloCamera(ArloChildDevice):
                     )
             else:
                 self.debug("idle snapshot")
-                self._take_idle_snapshot()
+                await self._take_idle_snapshot()
 
         for check in self._core.cfg.snapshot_checks:
             self.debug("queueing snapshot check in {}".format(check))
@@ -849,24 +840,32 @@ class ArloCamera(ArloChildDevice):
                 self._objs.ml.queue_update, check, cb=self._update_from_media_library
             )
 
+    def request_snapshot(self):
+        """Requests a snapshot from the camera without blocking.
+
+        The snapshot can be handled with callbacks registered to
+        LAST_IMAGE_SRC_KEY - lastImageSource starting with snapshot/, or capture/
+        LAST_IMAGE_DATA_KEY - presignedLastImageData containing the image data.
+        """
+        self._core.bg.run(self._request_snapshot)
+
         self.vdebug("handle dodgy cameras")
         self._core.bg.run_in(self._stop_snapshot, self._core.cfg.snapshot_timeout)
 
-    def get_snapshot(self, timeout=60):
+    async def get_snapshot(self, timeout=60):
         """Gets a snapshot from the camera and returns it.
 
         :param timeout: how long to wait, in seconds, before stopping the snapshot attempt
         :return: a binary represention of the image, or the last image if snapshot timed out
         :rtype: bytearray
         """
-        self.request_snapshot()
+        await self._request_snapshot()
 
         mnow = time.monotonic()
         mend = mnow + timeout
-        with self._lock:
-            while mnow < mend and self.has_user_request("snapshot"):
-                self._lock.wait(mend - mnow)
-                mnow = time.monotonic()
+        while mnow < mend and self.has_user_request("snapshot"):
+            await asyncio.sleep(0.5)
+            mnow = time.monotonic()
         self.debug("finished snapshot")
         return self.last_image_from_cache
 
@@ -1097,7 +1096,7 @@ class ArloCamera(ArloChildDevice):
     def siren_state(self):
         return self._load(SIREN_STATE_KEY, "off")
 
-    def siren_on(self, duration=300, volume=8):
+    async def siren_on(self, duration=300, volume=8):
         """Turn camera siren on.
 
         Does nothing if camera doesn't support sirens.
@@ -1116,13 +1115,13 @@ class ArloCamera(ArloChildDevice):
                 "pattern": "alarm",
             },
         }
-        self._core.be.notify(
+        await self._core.be.notify(
             device_id=self.device_id,
             xcloud_id=self.xcloud_id,
             body=body
         )
 
-    def siren_off(self):
+    async def siren_off(self):
         """Turn camera siren off.
 
         Does nothing if camera doesn't support sirens.
@@ -1133,7 +1132,7 @@ class ArloCamera(ArloChildDevice):
             "publishResponse": True,
             "properties": {"sirenState": "off"},
         }
-        self._core.be.notify(
+        await self._core.be.notify(
             device_id=self.device_id,
             xcloud_id=self.xcloud_id,
             body=body
@@ -1144,7 +1143,7 @@ class ArloCamera(ArloChildDevice):
         """Returns `True` if the camera turned on."""
         return not self._load(PRIVACY_KEY, False)
 
-    def turn_on(self):
+    async def turn_on(self):
         """Turn the camera on."""
         body = {
             "action": "set",
@@ -1152,13 +1151,13 @@ class ArloCamera(ArloChildDevice):
             "publishResponse": True,
             "properties": {"privacyActive": False},
         }
-        self._core.be.notify(
+        await self._core.be.notify(
             device_id=self.base_station.device_id,
             xcloud_id=self.base_station.xcloud_id,
             body=body
         )
 
-    def turn_off(self):
+    async def turn_off(self):
         """Turn the camera off."""
         body = {
             "action": "set",
@@ -1166,7 +1165,7 @@ class ArloCamera(ArloChildDevice):
             "publishResponse": True,
             "properties": {"privacyActive": True},
         }
-        self._core.be.notify(
+        await self._core.be.notify(
             device_id=self.base_station.device_id,
             xcloud_id=self.base_station.xcloud_id,
             body=body
@@ -1181,7 +1180,7 @@ class ArloCamera(ArloChildDevice):
             body=body
         )
 
-    def play_track(self, track_id=None, position=0):
+    async def play_track(self, track_id=None, position=0):
         """Play the track. A track ID of None will resume playing the current
         track.
 
@@ -1209,52 +1208,52 @@ class ArloCamera(ArloChildDevice):
                     "action": "play",
                 }
             )
-        self._core.be.notify(
+        await self._core.be.notify(
             device_id=self.device_id,
             xcloud_id=self.xcloud_id,
             body=body
         )
 
-    def pause_track(self):
+    async def pause_track(self):
         """Pause the playing track."""
         body = {
             "action": "pause",
             "publishResponse": True,
             "resource": MEDIA_PLAYER_RESOURCE_ID,
         }
-        self._core.be.notify(
+        await self._core.be.notify(
             device_id=self.device_id,
             xcloud_id=self.xcloud_id,
             body=body
         )
 
-    def previous_track(self):
+    async def previous_track(self):
         """Skips to the previous track in the playlist."""
         body = {
             "action": "prevTrack",
             "publishResponse": True,
             "resource": MEDIA_PLAYER_RESOURCE_ID,
         }
-        self._core.be.notify(
+        await self._core.be.notify(
             device_id=self.device_id,
             xcloud_id=self.xcloud_id,
             body=body
         )
 
-    def next_track(self):
+    async def next_track(self):
         """Skips to the next track in the playlist."""
         body = {
             "action": "nextTrack",
             "publishResponse": True,
             "resource": MEDIA_PLAYER_RESOURCE_ID,
         }
-        self._core.be.notify(
+        await self._core.be.notify(
             device_id=self.device_id,
             xcloud_id=self.xcloud_id,
             body=body
         )
 
-    def set_music_loop_mode_continuous(self):
+    async def set_music_loop_mode_continuous(self):
         """Sets the music loop mode to repeat the entire playlist."""
         body = {
             "action": "set",
@@ -1262,13 +1261,13 @@ class ArloCamera(ArloChildDevice):
             "resource": "audioPlayback/config",
             "properties": {"config": {"loopbackMode": "continuous"}},
         }
-        self._core.be.notify(
+        await self._core.be.notify(
             device_id=self.device_id,
             xcloud_id=self.xcloud_id,
             body=body
         )
 
-    def set_music_loop_mode_single(self):
+    async def set_music_loop_mode_single(self):
         """Sets the music loop mode to repeat the current track."""
         body = {
             "action": "set",
@@ -1276,13 +1275,13 @@ class ArloCamera(ArloChildDevice):
             "resource": "audioPlayback/config",
             "properties": {"config": {"loopbackMode": "singleTrack"}},
         }
-        self._core.be.notify(
+        await self._core.be.notify(
             device_id=self.device_id,
             xcloud_id=self.xcloud_id,
             body=body
         )
 
-    def set_shuffle(self, shuffle=True):
+    async def set_shuffle(self, shuffle=True):
         """Sets playback to shuffle.
 
         :param shuffle: `True` to turn on shuffle.
@@ -1293,7 +1292,7 @@ class ArloCamera(ArloChildDevice):
             "resource": "audioPlayback/config",
             "properties": {"config": {"shuffleActive": shuffle}},
         }
-        self._core.be.notify(
+        await self._core.be.notify(
             device_id=self.device_id,
             xcloud_id=self.xcloud_id,
             body=body
@@ -1317,11 +1316,11 @@ class ArloCamera(ArloChildDevice):
             body=body
         )
 
-    def _set_nightlight_properties(self, properties):
+    async def _set_nightlight_properties(self, properties):
         self.debug(
             "{}: setting nightlight properties: {}".format(self._name, properties)
         )
-        self._core.be.notify(
+        await self._core.be.notify(
             device_id=self.base_station.device_id,
             xcloud_id=self.base_station.xcloud_id,
             body={
@@ -1335,18 +1334,18 @@ class ArloCamera(ArloChildDevice):
 
     def nightlight_on(self):
         """Turns the nightlight on."""
-        return self._set_nightlight_properties({"enabled": True})
+        self._core.bg.run(self._set_nightlight_properties, properties={"enabled": True})
 
     def nightlight_off(self):
         """Turns the nightlight off."""
-        return self._set_nightlight_properties({"enabled": False})
+        self._core.bg.run(self._set_nightlight_properties, properties={"enabled": False})
 
     def set_nightlight_brightness(self, brightness):
         """Sets the nightlight brightness.
 
         :param brightness: brightness (0-255)
         """
-        return self._set_nightlight_properties({"brightness": brightness})
+        self._core.bg.run(self._set_nightlight_properties, properties={"brightness": brightness})
 
     def set_nightlight_rgb(self, red=255, green=255, blue=255):
         """Turns the nightlight color to the specified RGB value.
@@ -1355,18 +1354,18 @@ class ArloCamera(ArloChildDevice):
         :param green: green value
         :param blue: blue value
         """
-        return self._set_nightlight_properties(
-            {"mode": "rgb", "rgb": {"red": red, "green": green, "blue": blue}}
-        )
+        self._core.bg.run(self._set_nightlight_properties, properties={
+            "mode": "rgb", "rgb": {"red": red, "green": green, "blue": blue}
+        })
 
     def set_nightlight_color_temperature(self, temperature):
         """Turns the nightlight to the specified Kelvin color temperature.
 
         :param temperature: temperature, in Kelvin
         """
-        return self._set_nightlight_properties(
-            {"mode": "temperature", "temperature": str(temperature)}
-        )
+        self._core.bg.run(self._set_nightlight_properties, properties={
+            "mode": "temperature", "temperature": str(temperature)
+        })
 
     def set_nightlight_mode(self, mode):
         """Turns the nightlight to a particular mode.
@@ -1374,13 +1373,13 @@ class ArloCamera(ArloChildDevice):
         :param mode: either `rgb`, `temperature` or `rainbow`
         :return:
         """
-        return self._set_nightlight_properties({"mode": mode})
+        self._core.bg.run(self._set_nightlight_properties, properties={"mode": mode})
 
-    def _set_spotlight_properties(self, properties):
+    async def _set_spotlight_properties(self, properties):
         self.debug(
             "{}: setting spotlight properties: {}".format(self._name, properties)
         )
-        self._core.be.notify(
+        await self._core.be.notify(
             device_id=self.base_station.device_id,
             xcloud_id=self.base_station.xcloud_id,
             body={
@@ -1394,11 +1393,11 @@ class ArloCamera(ArloChildDevice):
 
     def set_spotlight_on(self):
         """Turns the spotlight on"""
-        return self._set_spotlight_properties({"enabled": True})
+        self._core.bg.run(self._set_spotlight_properties, properties={"enabled": True})
 
     def set_spotlight_off(self):
         """Turns the spotlight off"""
-        return self._set_spotlight_properties({"enabled": False})
+        self._core.bg.run(self._set_spotlight_properties, properties={"enabled": False})
 
     def set_spotlight_brightness(self, brightness):
         """Sets the nightlight brightness.
@@ -1407,13 +1406,13 @@ class ArloCamera(ArloChildDevice):
         """
         # Note: Intensity is 0-100 scale, which we map from 0-255 to
         #       provide an API consistent with nightlight brightness
-        return self._set_spotlight_properties({"intensity": (brightness / 255 * 100)})
+        self._core.bg.run(self._set_spotlight_properties, properties={"intensity": (brightness / 255 * 100)})
 
-    def _set_floodlight_properties(self, properties):
+    async def _set_floodlight_properties(self, properties):
         self.debug(
             "{}: setting floodlight properties: {}".format(self._name, properties)
         )
-        self._core.be.notify(
+        await self._core.be.notify(
             device_id=self.base_station.device_id,
             xcloud_id=self.base_station.xcloud_id,
             body={
@@ -1427,21 +1426,19 @@ class ArloCamera(ArloChildDevice):
 
     def floodlight_on(self):
         """Turns the floodlight on."""
-        return self._set_floodlight_properties({"on": True})
+        self._core.bg.run(self._set_floodlight_properties, properties={"on": True})
 
     def floodlight_off(self):
         """Turns the floodlight off."""
-        return self._set_floodlight_properties({"on": False})
+        self._core.bg.run(self._set_floodlight_properties, properties={"on": False})
 
     def set_floodlight_brightness(self, brightness):
         """Turns the floodlight brightness value (0-255)."""
         percentage = int(brightness / 255 * 100)
-        return self._set_floodlight_properties(
-            {
-                FLOODLIGHT_BRIGHTNESS1_KEY: percentage,
-                FLOODLIGHT_BRIGHTNESS2_KEY: percentage,
-            }
-        )
+        self._core.bg.run(self._set_floodlight_properties, properties={
+            FLOODLIGHT_BRIGHTNESS1_KEY: percentage,
+            FLOODLIGHT_BRIGHTNESS2_KEY: percentage,
+        })
 
     def has_capability(self, cap) -> bool:
         supports = ArloCapabilities.check_camera_supports(self, cap)

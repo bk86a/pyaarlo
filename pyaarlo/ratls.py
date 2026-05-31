@@ -1,3 +1,4 @@
+import asyncio
 import ssl
 import json
 import os
@@ -24,19 +25,20 @@ class ArloRatls:
         self._device_id = base.device_id
         self._security = SecurityUtils(core.cfg.storage_dir)
 
-        self._check_device_certs()
-        self.open_port()
-
     def _debug(self, msg):
         self._core.log.debug(f"ratls: {msg}")
 
-    def open_port(self):
+    async def start(self):
+        await self._check_device_certs()
+        await self.open_port()
+
+    async def open_port(self):
         """ RATLS port will automatically close after 10 minutes """
-        self._base_station_token = self._get_station_token()
+        self._base_station_token = await self._get_station_token()
 
         self._debug(f"Opening port for {self._unique_id}")
 
-        response = self._core.be.notify(
+        response = await self._core.be.notify(
             self._base.device_id,
             self._base.xcloud_id,
             {
@@ -54,27 +56,30 @@ class ArloRatls:
         self._base_connection_details = response['properties']
         self._setup_base_client()
 
-        response = self.get(RATLS_CONNECTIVITY_PATH)
+        response = await self.get(RATLS_CONNECTIVITY_PATH)
         if response is None or not response['success']:
             raise Exception(f"Failed to gain connectivity to ratls!")
 
         return self._base_connection_details
 
-    def get(self, path, raw=False):
+    async def get(self, path, raw=False):
         request = Request(f"{self.url}{path}")
         request.get_method = lambda: 'GET'
 
         for (k, v) in self._ratls_req_headers().items():
             request.add_header(k, v)
 
-        try:
-            response = self._base_client.open(request)
-            if raw:
-                return response
-            return json.loads(response.read())
-        except Exception as e:
-            self._core.log.warning("request-error={}".format(type(e).__name__))
-            return None
+        def _do_get():
+            try:
+                response = self._base_client.open(request)
+                if raw:
+                    return response
+                return json.loads(response.read())
+            except Exception as e:
+                self._core.log.warning("request-error={}".format(type(e).__name__))
+                return None
+
+        return await asyncio.get_running_loop().run_in_executor(None, _do_get)
 
     def _ratls_req_headers(self):
         return {
@@ -86,11 +91,11 @@ class ArloRatls:
             "User-Agent": self._core.cfg.user_agent_string()
         }
 
-    def _get_station_token(self):
+    async def _get_station_token(self):
         """ Tokens expire after 10 minutes """
         self._debug(f"Fetching token for {self._device_id}")
 
-        response = self._core.be.get(
+        response = await self._core.be.get(
             RATLS_TOKEN_GENERATE_PATH + f"/{self._device_id}"
         )
 
@@ -113,11 +118,11 @@ class ArloRatls:
 
         self._base_client = build_opener(HTTPSHandler(context=self._sslcontext))
 
-    def _check_device_certs(self):
+    async def _check_device_certs(self):
         self._debug(f"Checking for existing certificates for {self._unique_id}")
 
         if not self._security.has_device_certs(self._unique_id):
-            response = self._core.be.post(
+            response = await self._core.be.post(
                 CREATE_DEVICE_CERTS_PATH,
                 params={
                     "uuid": self._device_id,

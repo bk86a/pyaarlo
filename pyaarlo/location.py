@@ -114,8 +114,7 @@ class ArloLocation(ArloObject):
         """Returns the current mode."""
         return self._load(MODE_KEY, "unknown")
 
-    @mode.setter
-    def mode(self, id_or_name):
+    async def set_mode(self, id_or_name):
         """Set the location mode.
 
         :param id_or_name: mode to use, as returned by available_modes:
@@ -125,7 +124,7 @@ class ArloLocation(ArloObject):
         if mode_id is None:
             mode_id = id_or_name
         if mode_id is None:
-            self._core.log.error("passed invalid id or name {id_or_name}")
+            self._core.log.error(f"passed invalid id or name {id_or_name}")
             return
 
         # Need to change?
@@ -138,35 +137,38 @@ class ArloLocation(ArloObject):
         mode_revision = self._load(MODE_REVISION_KEY, 1)
         self.vdebug(f"old-revision={mode_revision}")
 
-        data = self._core.be.put(
+        data = await self._core.be.put(
             LOCATION_ACTIVEMODE_PATH_FORMAT.format(self._id) + f"&revision={mode_revision}",
             params={"mode": mode_id},
             headers=self._extra_headers())
 
-        mode_revision = data.get("revision")
-        self.vdebug(f"new-revision={mode_revision}")
+        if data:
+            mode_revision = data.get("revision")
+            self.vdebug(f"new-revision={mode_revision}")
 
-        self._save_and_do_callbacks(MODE_KEY, mode_id)
-        self._save(MODE_REVISION_KEY, mode_revision)
+            self._save_and_do_callbacks(MODE_KEY, mode_id)
+            self._save(MODE_REVISION_KEY, mode_revision)
 
-    @property
-    def mode_name(self):
-        """Returns the current mode using the Arlo friendly name."""
-        return self._id_to_name(self._load(MODE_KEY, "standby"))
+    @mode.setter
+    def mode(self, id_or_name):
+        """Set the location mode (sync wrapper).
+        """
+        self._core.bg.run(self.set_mode, id_or_name=id_or_name)
 
-    def update_mode(self):
+    async def update_mode(self):
         """Check and update the base's current mode."""
-        data = self._core.be.get(LOCATION_ACTIVEMODE_PATH_FORMAT.format(self._id),
-                                 headers=self._extra_headers())
-        mode_id = data.get("properties", {}).get('mode')
-        mode_revision = data.get("revision")
-        self._save_and_do_callbacks(MODE_KEY, mode_id)
-        self._save(MODE_REVISION_KEY, mode_revision)
+        data = await self._core.be.get(LOCATION_ACTIVEMODE_PATH_FORMAT.format(self._id),
+                                      headers=self._extra_headers())
+        if data:
+            mode_id = data.get("properties", {}).get('mode')
+            mode_revision = data.get("revision")
+            self._save_and_do_callbacks(MODE_KEY, mode_id)
+            self._save(MODE_REVISION_KEY, mode_revision)
 
-    def update_modes(self, _initial=False):
+    async def update_modes(self, _initial=False):
         """Get and update the available modes for the base."""
-        modes = self._core.be.get(LOCATION_MODES_PATH_FORMAT.format(self._id),
-                                  headers=self._extra_headers())
+        modes = await self._core.be.get(LOCATION_MODES_PATH_FORMAT.format(self._id),
+                                       headers=self._extra_headers())
         if modes is not None:
             self._parse_modes(modes.get("properties", {}))
         else:
@@ -192,3 +194,4 @@ class ArloLocation(ArloObject):
     @property
     def is_armed_away(self):
         return self.mode == "armAway"
+

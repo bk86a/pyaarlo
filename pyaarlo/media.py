@@ -1,3 +1,4 @@
+import asyncio
 import os
 import threading
 from datetime import datetime, timedelta
@@ -175,12 +176,12 @@ class ArloMediaLibrary:
     def __repr__(self):
         return "<{0}:{1}>".format(self.__class__.__name__, self._core.cfg.name)
 
-    def _fetch_library(self, date_from, date_to):
+    async def _fetch_library(self, date_from, date_to):
         """Get the library.
 
         Override as needed.
         """
-        return self._core.be.post(
+        return await self._core.be.post(
             LIBRARY_PATH, {"dateFrom": date_from, "dateTo": date_to}
         )
 
@@ -204,7 +205,7 @@ class ArloMediaLibrary:
             return camera[0]
         return None
 
-    def _sync_library(self, date_from, date_to, keys):
+    async def _sync_library(self, date_from, date_to, keys):
         """Read library between dates given, add videos not present.
 
         Passing an empty keys will cause all video information in the given
@@ -212,7 +213,7 @@ class ArloMediaLibrary:
         """
 
         # Fetch video metadata.
-        data = self._fetch_library(date_from, date_to)
+        data = await self._fetch_library(date_from, date_to)
         if data is None:
             self._core.log.warning("error loading the image library")
             return None, None, None
@@ -259,7 +260,7 @@ class ArloMediaLibrary:
         return videos, snapshots, keys
 
     # grab recordings from last day, add to existing library if not there
-    def update(self):
+    async def update(self):
         self.debug("updating image library")
 
         # Get known videos.
@@ -268,7 +269,7 @@ class ArloMediaLibrary:
 
         # Get today's new videos.
         date_to = datetime.today().strftime("%Y%m%d")
-        videos, snapshots, keys = self._sync_library(date_to, date_to, keys)
+        videos, snapshots, keys = await self._sync_library(date_to, date_to, keys)
         if videos is None:
             self._core.log.warning("error updating the image library")
             return
@@ -285,9 +286,12 @@ class ArloMediaLibrary:
 
         # run callbacks with no locks held
         for cb in cbs:
-            cb()
+            if asyncio.iscoroutinefunction(cb):
+                await cb()
+            else:
+                cb()
 
-    def load(self):
+    async def load(self):
 
         # set beginning and end
         days = self._core.cfg.library_days
@@ -297,7 +301,7 @@ class ArloMediaLibrary:
         self.debug(f"loading image library ({days} days)")
 
         # save videos for cameras we know about
-        videos, snapshots, keys = self._sync_library(date_from, date_to, [])
+        videos, snapshots, keys = await self._sync_library(date_from, date_to, [])
         if videos is None:
             self._core.log.warning("error loading the image library")
             return

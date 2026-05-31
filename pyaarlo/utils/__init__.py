@@ -1,8 +1,19 @@
+import asyncio
 import base64
 import time
 from datetime import datetime, timezone
 
 import requests
+
+
+async def http_get_async(url, filename=None):
+    """Download HTTP data (async)."""
+    return await asyncio.get_running_loop().run_in_executor(None, http_get, url, filename)
+
+
+async def http_get_img_async(url, ignore_date=False):
+    """Download HTTP image data (async)."""
+    return await asyncio.get_running_loop().run_in_executor(None, http_get_img, url, ignore_date)
 
 
 def utc_to_local(utc_dt):

@@ -1,124 +1,104 @@
+import asyncio
 import threading
 import time
 import traceback
-from typing import Union
+from typing import Union, Callable, Dict, Any, Optional
 
 from .logger import ArloLogger
 
 
-class ArloBackgroundWorker(threading.Thread):
-    
+class ArloBackground:
+    """An asyncio-based background worker that supports both sync and async callbacks.
+
+    This replaces the previous threading-based ArloBackgroundWorker. It allows for
+    gradual migration of the codebase to asyncio while maintaining compatibility
+    with existing synchronous code.
+    """
+
     def __init__(self, log: ArloLogger):
-        super().__init__()
-
         self._log: ArloLogger = log
+        self._tasks: Dict[str, Union[asyncio.Task, asyncio.Future]] = {}
+        self._counter: int = 0
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._thread: Optional[threading.Thread] = None
+        self._started = threading.Event()
 
-        self._lock: threading.Condition = threading.Condition()
-        self._id: int = 0
-        self._stop_thread: bool = False
-        self._queue = {}
+        # Try to get the running loop if it exists (e.g. if we're in an async context already)
+        try:
+            self._loop = asyncio.get_running_loop()
+            self._started.set()
+        except RuntimeError:
+            # Otherwise, start a dedicated loop in a background thread to bridge sync code
+            self._thread = threading.Thread(target=self._run_loop, name="ArloBackgroundLoop", daemon=True)
+            self._thread.start()
+            self._started.wait(timeout=5)
 
-        self._log.debug("background: worker started")
+        self._log.debug("background: created (asyncio-based)")
+
+    def _run_loop(self):
+        """Dedicated thread for running the asyncio event loop."""
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._started.set()
+        self._loop.run_forever()
 
     def _next_id(self) -> str:
-        self._id += 1
-        return str(self._id) + ":" + str(time.monotonic())
+        self._counter += 1
+        return str(self._counter) + ":" + str(time.monotonic())
 
-    def _run_next(self) -> Union[int, None]:
+    async def _execute_job(self, job_id: str, cb: Callable, args: Dict[str, Any]):
+        """Wraps the job execution to handle errors and cleanup."""
+        try:
+            if asyncio.iscoroutinefunction(cb):
+                await cb(**args)
+            else:
+                # Run sync callbacks in the default executor (thread pool)
+                await self._loop.run_in_executor(None, lambda: cb(**args))
+        except Exception as e:
+            self._log.error(
+                f"background: job-error={type(e).__name__}\n{traceback.format_exc()}"
+            )
+        finally:
+            self._tasks.pop(job_id, None)
 
-        # timeout in the future
-        timeout: int = int(time.monotonic() + 60)
+    async def _execute_delayed_job(self, job_id: str, seconds: float, cb: Callable, args: Dict[str, Any]):
+        """Wait for a specified delay before executing the job."""
+        await asyncio.sleep(seconds)
+        await self._execute_job(job_id, cb, args)
 
-        # go by priority...
-        for prio in sorted(self._queue.keys()):
-
-            # jobs in particular priority
-            for run_at, job_id in sorted(self._queue[prio].keys()):
-                if run_at <= int(time.monotonic()):
-                    job = self._queue[prio].pop((run_at, job_id))
-                    self._lock.release()
-
-                    # run it
-                    try:
-                        job["callback"](**job["args"])
-                    except Exception as e:
-                        self._log.error(
-                            f"background: job-error={type(e).__name__}\n{traceback.format_exc()}"
-                        )
-
-                    # reschedule?
-                    self._lock.acquire()
-                    run_every = job.get("run_every", None)
-                    if run_every:
-                        run_at += run_every
-                        self._queue[prio][(run_at, job_id)] = job
-
-                    # start going through list again
-                    return None
+    async def _execute_periodic_job(self, job_id: str, seconds: float, cb: Callable, args: Dict[str, Any]):
+        """Execute the job periodically."""
+        while True:
+            await asyncio.sleep(seconds)
+            # We don't want the periodic job to pop itself from self._tasks until cancelled
+            try:
+                if asyncio.iscoroutinefunction(cb):
+                    await cb(**args)
                 else:
-                    if run_at < timeout:
-                        timeout = run_at
-                    break
+                    await self._loop.run_in_executor(None, lambda: cb(**args))
+            except Exception as e:
+                self._log.error(
+                    f"background: periodic-job-error={type(e).__name__}\n{traceback.format_exc()}"
+                )
 
-        return timeout
+    def _submit(self, coro) -> Union[asyncio.Task, asyncio.Future]:
+        """Safely submit a coroutine to the event loop from any thread."""
+        try:
+            # If we are in the thread running the loop, we can use create_task
+            if asyncio.get_running_loop() is self._loop:
+                return asyncio.create_task(coro)
+        except RuntimeError:
+            # No loop running in this thread, or it's a different loop
+            pass
+        
+        # Otherwise, we must use run_coroutine_threadsafe
+        return asyncio.run_coroutine_threadsafe(coro, self._loop)
 
-    def run(self):
-
-        with self._lock:
-            while not self._stop_thread:
-
-                # loop till done
-                timeout = None
-                while timeout is None:
-                    timeout = self._run_next()
-
-                # wait or get going?
-                now = time.monotonic()
-                if now < timeout:
-                    self._lock.wait(timeout - now)
-
-    def queue_job(self, run_at, prio: int, job) -> str:
-        self._log.debug(f"background: queue-job={job}")
-        run_at = int(run_at)
-        with self._lock:
-            job_id = self._next_id()
-            if prio not in self._queue:
-                self._queue[prio] = {}
-            self._queue[prio][(run_at, job_id)] = job
-            self._lock.notify()
+    def _run(self, bg_cb, prio, **kwargs) -> str:
+        # Priority is currently ignored in this implementation
+        job_id = self._next_id()
+        self._tasks[job_id] = self._submit(self._execute_job(job_id, bg_cb, kwargs))
         return job_id
-
-    def stop_job(self, to_delete):
-        with self._lock:
-            for prio in self._queue.keys():
-                for run_at, job_id in self._queue[prio].keys():
-                    if job_id == to_delete:
-                        # print( 'cancelling ' + str(job_id) )
-                        del self._queue[prio][(run_at, job_id)]
-                        return True
-        return False
-    
-    def stop(self):
-        with self._lock:
-            self._stop_thread = True
-            self._lock.notify()
-        self.join(10)
-
-
-class ArloBackground:
-
-    def __init__(self, log: ArloLogger):
-        self._worker: ArloBackgroundWorker = ArloBackgroundWorker(log)
-
-        self._worker.name = "ArloBackgroundWorker"
-        self._worker.daemon = True
-        self._worker.start()
-
-        log.debug("background: created")
-
-    def _run(self, bg_cb, prio, **kwargs):
-        job = {"callback": bg_cb, "args": kwargs}
-        return self._worker.queue_job(time.monotonic(), prio, job)
 
     def run_high(self, bg_cb, **kwargs):
         return self._run(bg_cb, 10, **kwargs)
@@ -129,9 +109,10 @@ class ArloBackground:
     def run_low(self, bg_cb, **kwargs):
         return self._run(bg_cb, 99, **kwargs)
 
-    def _run_in(self, bg_cb, prio, seconds, **kwargs):
-        job = {"callback": bg_cb, "args": kwargs}
-        return self._worker.queue_job(time.monotonic() + seconds, prio, job)
+    def _run_in(self, bg_cb, prio, seconds, **kwargs) -> str:
+        job_id = self._next_id()
+        self._tasks[job_id] = self._submit(self._execute_delayed_job(job_id, seconds, bg_cb, kwargs))
+        return job_id
 
     def run_high_in(self, bg_cb, seconds, **kwargs):
         return self._run_in(bg_cb, 10, seconds, **kwargs)
@@ -143,8 +124,9 @@ class ArloBackground:
         return self._run_in(bg_cb, 99, seconds, **kwargs)
 
     def _run_every(self, bg_cb, prio, seconds, **kwargs) -> str:
-        job = {"run_every": seconds, "callback": bg_cb, "args": kwargs}
-        return self._worker.queue_job(time.monotonic() + seconds, prio, job)
+        job_id = self._next_id()
+        self._tasks[job_id] = self._submit(self._execute_periodic_job(job_id, seconds, bg_cb, kwargs))
+        return job_id
 
     def run_high_every(self, bg_cb, seconds, **kwargs):
         return self._run_every(bg_cb, 10, seconds, **kwargs)
@@ -155,9 +137,20 @@ class ArloBackground:
     def run_low_every(self, bg_cb, seconds, **kwargs):
         return self._run_every(bg_cb, 99, seconds, **kwargs)
 
-    def cancel(self, to_delete):
-        if to_delete is not None:
-            self._worker.stop_job(to_delete)
+    def cancel(self, to_delete: str):
+        if to_delete is not None and to_delete in self._tasks:
+            task = self._tasks.pop(to_delete)
+            task.cancel()
+            return True
+        return False
 
     def stop(self):
-        self._worker.stop()
+        """Stop the background worker and all pending tasks."""
+        for job_id in list(self._tasks.keys()):
+            self.cancel(job_id)
+
+        if self._thread and self._loop:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._thread.join(timeout=10)
+
+

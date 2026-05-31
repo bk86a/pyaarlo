@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json 
 
 import paho.mqtt.client as mqtt
@@ -244,9 +245,6 @@ class ArloEvent:
 
     Currently this can be either SSE or MQTT. Which to use is chosen by the
     user or (preferred) chosen by the Arlo servers.
-
-    This class does no threading. It's just a fancy wrapper that forwards to
-    a class doing the real work.
     """
 
     def __init__(self, cfg: ArloCfg, log: ArloLogger, bg: ArloBackground, details: ArloSessionDetails,
@@ -280,23 +278,19 @@ class ArloEvent:
         # Ready to run.
         self._state = _EventState.READY
 
-    def run(self):
+    async def run(self):
         """Call the back end run function.
-
-        This function will run until the connection closes. This can be for
-        several reasons:
-         - we closed it
-         - arlo closed it
-         - network connectivity issues
         """
         if self._state != _EventState.READY:
             self._session.log.warning(f"event is not ready in {self._state}")
             return
 
         self._state = _EventState.RUNNING
-        self._device.run()
+        # Provider run methods might still be blocking, so we might need to run them in a thread
+        # until they are fully async.
+        await asyncio.get_running_loop().run_in_executor(None, self._device.run)
 
-    def stop(self):
+    async def stop(self):
         """Ask the event stream to stop.
         """
         if self._state != _EventState.RUNNING:
@@ -304,17 +298,14 @@ class ArloEvent:
             return
 
         self._state = _EventState.STARTING
-        self._device.stop()
+        await asyncio.get_running_loop().run_in_executor(None, self._device.stop)
 
-    def update(self, **kwargs: Dict[str, Any]):
+    async def update(self, **kwargs: Dict[str, Any]):
         """Update the event stream.
-
-        This is stream specific; for MQTT it will update subscriptions, for
-        SSE it will do nothing.
         """
         if self._state != _EventState.RUNNING:
             self._session.log.warning(f"event is not running in {self._state}")
             return
 
-        self._device.update(**kwargs)
-        pass
+        # This might need threading if it's blocking
+        await asyncio.get_running_loop().run_in_executor(None, lambda: self._device.update(**kwargs))

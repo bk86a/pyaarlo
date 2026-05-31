@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import pickle
 import pprint
 import uuid
 import threading
+import traceback
 import cloudscraper
 
 from http.cookiejar import LWPCookieJar
@@ -248,7 +250,7 @@ class ArloSession:
         self.details.web_id = self.details.user_id + "_web"
         self.details.sub_id = "subscriptions/" + self.details.web_id
 
-    def request_tuple(
+    async def request_tuple(
             self,
             path,
             method="GET",
@@ -268,50 +270,60 @@ class ArloSession:
         if timeout is None:
             timeout = self._cfg.request_timeout
         try:
-            with self._lock:
-                if host is None:
-                    host = self._cfg.host
-                if authpost:
-                    url = host + path
-                else:
-                    tid = self._transaction_id()
-                    url = self._build_url(host + path, tid)
-                    headers['x-transaction-id'] = tid
+            if host is None:
+                host = self._cfg.host
+            if authpost:
+                url = host + path
+            else:
+                tid = self._transaction_id()
+                url = self._build_url(host + path, tid)
+                headers['x-transaction-id'] = tid
 
-                self._vdebug("request-url={}".format(url))
-                self._vdebug("request-params=\n{}".format(pprint.pformat(params)))
-                self._vdebug("request-headers=\n{}".format(pprint.pformat(headers)))
+            self._vdebug("request-url={}".format(url))
+            self._vdebug("request-params=\n{}".format(pprint.pformat(params)))
+            self._vdebug("request-headers=\n{}".format(pprint.pformat(headers)))
 
-                if method == "GET":
-                    r = self.details.connection.get(
-                        url,
-                        params=params,
-                        headers=headers,
-                        stream=stream,
-                        timeout=timeout,
-                        cookies=cookies,
-                    )
-                    if stream is True:
-                        return 200, r
-                elif method == "PUT":
-                    r = self.details.connection.put(
-                        url, json=params, headers=headers, timeout=timeout, cookies=cookies,
-                    )
-                elif method == "POST":
-                    r = self.details.connection.post(
-                        url, json=params, headers=headers, timeout=timeout, cookies=cookies,
-                    )
-                elif method == "OPTIONS":
-                    self.details.connection.options(
-                        url, json=params, headers=headers, timeout=timeout
-                    )
-                    return 200, None
+            # Use to_thread to keep cloudscraper (which is blocking) from blocking the event loop
+            def _do_request():
+                with self._lock:
+                    if method == "GET":
+                        r = self.details.connection.get(
+                            url,
+                            params=params,
+                            headers=headers,
+                            stream=stream,
+                            timeout=timeout,
+                            cookies=cookies,
+                        )
+                        if stream is True:
+                            return 200, r
+                    elif method == "PUT":
+                        r = self.details.connection.put(
+                            url, json=params, headers=headers, timeout=timeout, cookies=cookies,
+                        )
+                    elif method == "POST":
+                        r = self.details.connection.post(
+                            url, json=params, headers=headers, timeout=timeout, cookies=cookies,
+                        )
+                    elif method == "OPTIONS":
+                        self.details.connection.options(
+                            url, json=params, headers=headers, timeout=timeout
+                        )
+                        return 200, None
+                    return r
+
+            r_or_tuple = await asyncio.get_running_loop().run_in_executor(None, _do_request)
+            if isinstance(r_or_tuple, tuple):
+                return r_or_tuple
+            r = r_or_tuple
+
         except Exception as e:
             self._log.warning("request-error={}".format(type(e).__name__))
+            self._log.warning(traceback.format_exc())
             return 500, None
 
         try:
-            if "application/json" in r.headers["Content-Type"]:
+            if "application/json" in r.headers.get("Content-Type", ""):
                 body = r.json()
             else:
                 body = r.text
@@ -350,7 +362,7 @@ class ArloSession:
 
         return 500, None
 
-    def request(
+    async def request(
             self,
             path,
             method="GET",
@@ -363,7 +375,7 @@ class ArloSession:
             authpost=False,
             cookies=None
     ):
-        code, body = self.request_tuple(path=path, method=method, params=params, headers=headers,
-                                        stream=stream, raw=raw, timeout=timeout, host=host, authpost=authpost, cookies=cookies)
+        code, body = await self.request_tuple(path=path, method=method, params=params, headers=headers,
+                                              stream=stream, raw=raw, timeout=timeout, host=host, authpost=authpost, cookies=cookies)
         return body
 
