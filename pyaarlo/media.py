@@ -340,7 +340,7 @@ class ArloMediaLibrary:
         with self._lock:
             if not self._load_cbs_:
                 self.debug("queueing image library update")
-                self._core.bg.run_low_in(self.update, 2)
+                self._core.bg.run_in(self.update, 2)
             self._load_cbs_.append(cb)
 
     def stop(self):

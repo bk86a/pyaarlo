@@ -27,13 +27,13 @@ class ArloBackground:
         try:
             self._loop = asyncio.get_running_loop()
             self._started.set()
+            self._log.debug("background: created (asyncio-based)")
         except RuntimeError:
             # Otherwise, start a dedicated loop in a background thread to bridge sync code
             self._thread = threading.Thread(target=self._run_loop, name="ArloBackgroundLoop", daemon=True)
             self._thread.start()
             self._started.wait(timeout=5)
-
-        self._log.debug("background: created (asyncio-based)")
+            self._log.debug("background: created (non-asyncio-based)")
 
     def _run_loop(self):
         """Dedicated thread for running the asyncio event loop."""
@@ -94,48 +94,20 @@ class ArloBackground:
         # Otherwise, we must use run_coroutine_threadsafe
         return asyncio.run_coroutine_threadsafe(coro, self._loop)
 
-    def _run(self, bg_cb, prio, **kwargs) -> str:
-        # Priority is currently ignored in this implementation
+    def run(self, bg_cb, **kwargs) -> str:
         job_id = self._next_id()
         self._tasks[job_id] = self._submit(self._execute_job(job_id, bg_cb, kwargs))
         return job_id
 
-    def run_high(self, bg_cb, **kwargs):
-        return self._run(bg_cb, 10, **kwargs)
-
-    def run(self, bg_cb, **kwargs):
-        return self._run(bg_cb, 40, **kwargs)
-
-    def run_low(self, bg_cb, **kwargs):
-        return self._run(bg_cb, 99, **kwargs)
-
-    def _run_in(self, bg_cb, prio, seconds, **kwargs) -> str:
+    def run_in(self, bg_cb, seconds, **kwargs) -> str:
         job_id = self._next_id()
         self._tasks[job_id] = self._submit(self._execute_delayed_job(job_id, seconds, bg_cb, kwargs))
         return job_id
 
-    def run_high_in(self, bg_cb, seconds, **kwargs):
-        return self._run_in(bg_cb, 10, seconds, **kwargs)
-
-    def run_in(self, bg_cb, seconds, **kwargs):
-        return self._run_in(bg_cb, 40, seconds, **kwargs)
-
-    def run_low_in(self, bg_cb, seconds, **kwargs):
-        return self._run_in(bg_cb, 99, seconds, **kwargs)
-
-    def _run_every(self, bg_cb, prio, seconds, **kwargs) -> str:
+    def run_every(self, bg_cb, seconds, **kwargs) -> str:
         job_id = self._next_id()
         self._tasks[job_id] = self._submit(self._execute_periodic_job(job_id, seconds, bg_cb, kwargs))
         return job_id
-
-    def run_high_every(self, bg_cb, seconds, **kwargs):
-        return self._run_every(bg_cb, 10, seconds, **kwargs)
-
-    def run_every(self, bg_cb, seconds, **kwargs) -> str:
-        return self._run_every(bg_cb, 40, seconds, **kwargs)
-
-    def run_low_every(self, bg_cb, seconds, **kwargs):
-        return self._run_every(bg_cb, 99, seconds, **kwargs)
 
     def cancel(self, to_delete: str):
         if to_delete is not None and to_delete in self._tasks:

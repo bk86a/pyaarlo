@@ -176,7 +176,7 @@ class ArloCamera(ArloChildDevice):
             if self._load(SNAPSHOT_KEY, None) != snapshot.image_url:
                 self.debug("snapshot updated for media " + self.name)
                 self._save(SNAPSHOT_KEY, snapshot.image_url)
-                self._core.bg.run_low(self._update_image_from_snapshot)
+                self._core.bg.run(self._update_image_from_snapshot)
             else:
                 self.debug("snapshot already done for " + self.name)
 
@@ -185,7 +185,7 @@ class ArloCamera(ArloChildDevice):
             if self._load(LAST_IMAGE_KEY, None) != last_image:
                 self.debug("image updated for media " + self.name)
                 self._save(LAST_IMAGE_KEY, last_image)
-                self._core.bg.run_low(self._update_image_from_capture)
+                self._core.bg.run(self._update_image_from_capture)
             else:
                 self.debug("image already done for " + self.name)
 
@@ -401,13 +401,13 @@ class ArloCamera(ArloChildDevice):
             if LAST_IMAGE_KEY in event:
                 if not self.is_taking_snapshot:
                     self.debug("{} -> thumbnail changed".format(self.name))
-                    self._core.bg.run_low(self._update_image_from_capture)
+                    self._core.bg.run(self._update_image_from_capture)
                 else:
                     self.debug(
                         "{} -> snapshot(thumbnail) ready".format(self.name)
                     )
                     self._save(SNAPSHOT_KEY, event.get(LAST_IMAGE_KEY, ""))
-                    self._core.bg.run_low(self._update_image_from_snapshot, ignore_date=True)
+                    self._core.bg.run(self._update_image_from_snapshot, ignore_date=True)
 
             # Recording has stopped so a new video is available. Queue an
             # media update, this could later trigger a snapshot or image
@@ -424,7 +424,7 @@ class ArloCamera(ArloChildDevice):
             if "/snapshots/" in value:
                 self.debug("{} -> snapshot1 ready".format(self.name))
                 self._save(SNAPSHOT_KEY, value)
-                self._core.bg.run_low(self._update_image_from_snapshot)
+                self._core.bg.run(self._update_image_from_snapshot)
             if "/recordings/" in value:
                 self.debug("{} -> new recording ready".format(self.name))
 
@@ -473,7 +473,7 @@ class ArloCamera(ArloChildDevice):
             if value is not None:
                 self.debug("{} -> snapshot2 ready".format(self.name))
                 self._save(SNAPSHOT_KEY, value)
-                self._core.bg.run_low(self._update_image_from_snapshot)
+                self._core.bg.run(self._update_image_from_snapshot)
 
         # Non subscription...
         if event.get("action", "") == "lastImageSnapshotAvailable":
@@ -481,7 +481,7 @@ class ArloCamera(ArloChildDevice):
             if value is not None:
                 self.debug("{} -> snapshot3 ready".format(self.name))
                 self._save(SNAPSHOT_KEY, value)
-                self._core.bg.run_low(self._update_image_from_snapshot)
+                self._core.bg.run(self._update_image_from_snapshot)
 
         # Ambient sensors update, decode and push changes.
         if resource.endswith("/ambientSensors/history"):
@@ -741,7 +741,7 @@ class ArloCamera(ArloChildDevice):
             await self._update_from_media_library()
         else:
             self.debug("queueing media update")
-            self._core.bg.run_low(self._update_from_media_library)
+            self._core.bg.run(self._update_from_media_library)
 
     async def update_last_image(self, wait=None):
         """Requests last thumbnail from the backend server.
@@ -758,7 +758,7 @@ class ArloCamera(ArloChildDevice):
             await self._update_image_from_capture()
         else:
             self.debug("queueing image update")
-            self._core.bg.run_low(self._update_image_from_capture)
+            self._core.bg.run(self._update_image_from_capture)
 
     async def update_ambient_sensors(self):
         """Requests the latest temperature, humidity and air quality settings.
