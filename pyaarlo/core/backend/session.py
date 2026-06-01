@@ -4,7 +4,6 @@ import asyncio
 import pickle
 import pprint
 import uuid
-import threading
 import traceback
 
 from http.cookiejar import LWPCookieJar
@@ -59,7 +58,7 @@ class ArloSession:
 
         self.details: ArloSessionDetails = ArloSessionDetails()
 
-        self._lock: threading.Lock = threading.Lock()
+        self._lock = asyncio.Lock()
         self._save_enabled = cfg.save_session
         self._save_filename = cfg.session_file
         self._save_username = cfg.username
@@ -284,34 +283,34 @@ class ArloSession:
 
             # Use to_thread to keep cloudscraper (which is blocking) from blocking the event loop
             def _do_request():
-                with self._lock:
-                    if method == "GET":
-                        r = self.details.connection.get(
-                            url,
-                            params=params,
-                            headers=headers,
-                            stream=stream,
-                            timeout=timeout,
-                            cookies=cookies,
-                        )
-                        if stream is True:
-                            return 200, r
-                    elif method == "PUT":
-                        r = self.details.connection.put(
-                            url, json=params, headers=headers, timeout=timeout, cookies=cookies,
-                        )
-                    elif method == "POST":
-                        r = self.details.connection.post(
-                            url, json=params, headers=headers, timeout=timeout, cookies=cookies,
-                        )
-                    elif method == "OPTIONS":
-                        self.details.connection.options(
-                            url, json=params, headers=headers, timeout=timeout
-                        )
-                        return 200, None
-                    return r
+                if method == "GET":
+                    r = self.details.connection.get(
+                        url,
+                        params=params,
+                        headers=headers,
+                        stream=stream,
+                        timeout=timeout,
+                        cookies=cookies,
+                    )
+                    if stream is True:
+                        return 200, r
+                elif method == "PUT":
+                    r = self.details.connection.put(
+                        url, json=params, headers=headers, timeout=timeout, cookies=cookies,
+                    )
+                elif method == "POST":
+                    r = self.details.connection.post(
+                        url, json=params, headers=headers, timeout=timeout, cookies=cookies,
+                    )
+                elif method == "OPTIONS":
+                    self.details.connection.options(
+                        url, json=params, headers=headers, timeout=timeout
+                    )
+                    return 200, None
+                return r
 
-            r_or_tuple = await asyncio.get_running_loop().run_in_executor(None, _do_request)
+            async with self._lock:
+                r_or_tuple = await asyncio.get_running_loop().run_in_executor(None, _do_request)
             if isinstance(r_or_tuple, tuple):
                 return r_or_tuple
             r = r_or_tuple

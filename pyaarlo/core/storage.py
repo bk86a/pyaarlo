@@ -2,7 +2,6 @@ import fnmatch
 import pickle
 import os
 import pprint
-import threading
 from typing import Union
 
 from .cfg import ArloCfg
@@ -16,7 +15,6 @@ class ArloStorage:
         self._log: ArloLogger = log
 
         self._state_file: Union[str, None] = self._cfg.state_file
-        self._lock: threading.Lock = threading.Lock()
         self._db = {}
 
         self._create_storage_directory()
@@ -39,7 +37,8 @@ class ArloStorage:
     def _keys_matching(self, key):
         mkeys = []
         ekey = self._ekey(key)
-        for mkey in self._db:
+        # Use a list copy of keys to be thread-safe against concurrent modifications
+        for mkey in list(self._db.keys()):
             if fnmatch.fnmatch(mkey, ekey):
                 mkeys.append(mkey)
         return mkeys
@@ -47,18 +46,18 @@ class ArloStorage:
     def load(self):
         if self._state_file is not None:
             try:
-                with self._lock:
-                    with open(self._state_file, "rb") as dump:
-                        self._db = pickle.load(dump)
+                with open(self._state_file, "rb") as dump:
+                    self._db = pickle.load(dump)
             except Exception:
                 self._log.debug("storage: file not read")
 
     def save(self):
         if self._state_file is not None:
             try:
-                with self._lock:
-                    with open(self._state_file, "wb") as dump:
-                        pickle.dump(self._db, dump)
+                # Shallow copy the dict atomically to prevent iteration errors during pickle
+                db_copy = self._db.copy()
+                with open(self._state_file, "wb") as dump:
+                    pickle.dump(db_copy, dump)
             except Exception:
                 self._log.warning("storage: file not written")
 
@@ -66,37 +65,32 @@ class ArloStorage:
         return self._state_file
 
     def get(self, key, default=None):
-        with self._lock:
-            ekey = self._ekey(key)
-            return self._db.get(ekey, default)
+        ekey = self._ekey(key)
+        return self._db.get(ekey, default)
 
     def get_matching(self, key, default=None):
-        with self._lock:
-            gets = []
-            for mkey in self._keys_matching(key):
-                gets.append((mkey, self._db.get(mkey, default)))
-            return gets
+        gets = []
+        for mkey in self._keys_matching(key):
+            gets.append((mkey, self._db.get(mkey, default)))
+        return gets
 
     def keys_matching(self, key):
-        with self._lock:
-            return self._keys_matching(key)
+        return self._keys_matching(key)
 
     def set(self, key, value, prefix=""):
         ekey = self._ekey(key)
         output = "set:" + ekey + "=" + str(value)
         self._log.vdebug(f"{prefix}: {output[:80]}")
-        with self._lock:
-            self._db[ekey] = value
-            return value
+        self._db[ekey] = value
+        return value
 
     def unset(self, key):
-        with self._lock:
-            del self._db[self._ekey(key)]
+        ekey = self._ekey(key)
+        if ekey in self._db:
+            del self._db[ekey]
 
     def clear(self):
-        with self._lock:
-            self._db = {}
+        self._db = {}
 
     def dump(self):
-        with self._lock:
-            pprint.pprint(self._db)
+        pprint.pprint(self._db.copy())

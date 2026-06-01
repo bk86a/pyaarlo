@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import pprint
 import re
-import threading
 import time
 import uuid
 import cloudscraper
@@ -96,7 +95,6 @@ class ArloBackEnd:
         self._event: _EventDetails = _EventDetails()
 
         # Remaining state variables.
-        self._lock: threading.Lock = threading.Lock()
         self._dump_file = self._cfg.dump_file
         self._requests = {}
         self._callbacks = {}
@@ -1109,19 +1107,17 @@ class ArloBackEnd:
         return self._multi_location
 
     def add_listener(self, device_id, unique_id, callback):
-        with self._lock:
-            if device_id not in self._callbacks:
-                self._callbacks[device_id] = []
-            self._callbacks[device_id].append(callback)
-            if unique_id not in self._callbacks:
-                self._callbacks[unique_id] = []
-            self._callbacks[unique_id].append(callback)
+        if device_id not in self._callbacks:
+            self._callbacks[device_id] = []
+        self._callbacks[device_id].append(callback)
+        if unique_id not in self._callbacks:
+            self._callbacks[unique_id] = []
+        self._callbacks[unique_id].append(callback)
 
     def add_any_listener(self, callback):
-        with self._lock:
-            if "all" not in self._callbacks:
-                self._callbacks["all"] = []
-            self._callbacks["all"].append(callback)
+        if "all" not in self._callbacks:
+            self._callbacks["all"] = []
+        self._callbacks["all"].append(callback)
 
     def del_listener(self, device, callback):
         pass

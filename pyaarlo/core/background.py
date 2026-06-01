@@ -1,5 +1,4 @@
 import asyncio
-import threading
 import time
 import traceback
 from typing import Union, Callable, Dict, Any, Optional
@@ -8,39 +7,14 @@ from .logger import ArloLogger
 
 
 class ArloBackground:
-    """An asyncio-based background worker that supports both sync and async callbacks.
-
-    This replaces the previous threading-based ArloBackgroundWorker. It allows for
-    gradual migration of the codebase to asyncio while maintaining compatibility
-    with existing synchronous code.
-    """
+    """An asyncio-based background worker that supports both sync and async callbacks."""
 
     def __init__(self, log: ArloLogger):
         self._log: ArloLogger = log
-        self._tasks: Dict[str, Union[asyncio.Task, asyncio.Future]] = {}
+        self._tasks: Dict[str, asyncio.Task] = {}
         self._counter: int = 0
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._thread: Optional[threading.Thread] = None
-        self._started = threading.Event()
-
-        # Try to get the running loop if it exists (e.g. if we're in an async context already)
-        try:
-            self._loop = asyncio.get_running_loop()
-            self._started.set()
-            self._log.debug("background: created (asyncio-based)")
-        except RuntimeError:
-            # Otherwise, start a dedicated loop in a background thread to bridge sync code
-            self._thread = threading.Thread(target=self._run_loop, name="ArloBackgroundLoop", daemon=True)
-            self._thread.start()
-            self._started.wait(timeout=5)
-            self._log.debug("background: created (non-asyncio-based)")
-
-    def _run_loop(self):
-        """Dedicated thread for running the asyncio event loop."""
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        self._started.set()
-        self._loop.run_forever()
+        self._loop = asyncio.get_running_loop()
+        self._log.debug("background: created (asyncio-based)")
 
     def _next_id(self) -> str:
         self._counter += 1
@@ -88,10 +62,10 @@ class ArloBackground:
             if asyncio.get_running_loop() is self._loop:
                 return asyncio.create_task(coro)
         except RuntimeError:
-            # No loop running in this thread, or it's a different loop
+            # No loop running in this thread
             pass
-        
-        # Otherwise, we must use run_coroutine_threadsafe
+
+        # Otherwise, we must use run_coroutine_threadsafe to submit from a thread
         return asyncio.run_coroutine_threadsafe(coro, self._loop)
 
     def run(self, bg_cb, **kwargs) -> str:
@@ -120,9 +94,3 @@ class ArloBackground:
         """Stop the background worker and all pending tasks."""
         for job_id in list(self._tasks.keys()):
             self.cancel(job_id)
-
-        if self._thread and self._loop:
-            self._loop.call_soon_threadsafe(self._loop.stop)
-            self._thread.join(timeout=10)
-
-

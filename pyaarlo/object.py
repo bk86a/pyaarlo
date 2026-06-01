@@ -1,4 +1,3 @@
-import threading
 from unidecode import unidecode
 
 from .constant import (
@@ -38,7 +37,6 @@ class ArloObject:
         self._type = type
         self._uid = uid
 
-        self._lock = threading.Lock()
         self._attr_cbs_ = []
 
         # add a listener
@@ -64,10 +62,9 @@ class ArloObject:
 
     def _do_callbacks(self, attr, value):
         cbs = []
-        with self._lock:
-            for watch, cb in self._attr_cbs_:
-                if watch == attr or watch == "*":
-                    cbs.append(cb)
+        for watch, cb in self._attr_cbs_:
+            if watch == attr or watch == "*":
+                cbs.append(cb)
         for cb in cbs:
             cb(self, attr, value)
 
@@ -158,8 +155,7 @@ class ArloObject:
         :type attr: str
         :param cb: Callback to run.
         """
-        with self._lock:
-            self._attr_cbs_.append((attr, cb))
+        self._attr_cbs_.append((attr, cb))
 
     @property
     def state(self):

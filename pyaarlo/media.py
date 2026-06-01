@@ -1,6 +1,5 @@
 import asyncio
 import os
-import threading
 from datetime import datetime, timedelta
 from string import Template
 from slugify import slugify
@@ -11,19 +10,21 @@ from .constant import (
 )
 from .core import ArloCore
 from .objects import ArloObjects
-from .utils import (arlotime_strftime, arlotime_to_datetime, http_get,
+from .utils import (arlotime_strftime, arlotime_to_datetime, http_get_async,
 http_stream)
 
 
-class ArloMediaDownloader(threading.Thread):
+class ArloMediaDownloader:
     def __init__(self, core: ArloCore, save_format):
-        super().__init__()
         self._core = core
         self._save_format = save_format
-        self._lock = threading.Condition()
-        self._queue = []
-        self._stopThread = False
+        self._queue = asyncio.Queue()
         self._downloading = False
+        self._task = None
+
+    def start(self):
+        if self._save_format:
+            self._task = asyncio.create_task(self._run())
 
     # noinspection PyPep8Naming
     def _output_name(self, media):
@@ -68,7 +69,7 @@ class ArloMediaDownloader(threading.Thread):
             self._core.log.error(f"format error: {self._save_format}")
             return None
 
-    def _download(self, media):
+    async def _download(self, media):
         """Download a single piece of media.
 
         :param media: ArloMediaObject to download
@@ -80,13 +81,16 @@ class ArloMediaDownloader(threading.Thread):
             return -1
         try:
             # See if it exists.
-            os.makedirs(os.path.dirname(save_file), exist_ok=True)
-            if not os.path.exists(save_file):
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, lambda: os.makedirs(os.path.dirname(save_file), exist_ok=True))
+            
+            exists = await loop.run_in_executor(None, os.path.exists, save_file)
+            if not exists:
                 # Download to temporary file before renaming it.
                 self.debug(f"dowloading for {media.camera.name} --> {save_file}")
                 save_file_tmp = f"{save_file}.tmp"
-                media.download_video(save_file_tmp)
-                os.rename(save_file_tmp, save_file)
+                await media.download_video(save_file_tmp)
+                await loop.run_in_executor(None, os.rename, save_file_tmp, save_file)
                 return 1
             else:
                 self.vdebug(
@@ -97,52 +101,37 @@ class ArloMediaDownloader(threading.Thread):
             self._core.log.error(f"failed to download: {save_file}")
             return -1
 
-    def run(self):
-        if self._save_format == "":
-            self.debug("not starting downloader")
-            return
-        with self._lock:
-            while not self._stopThread:
-                media = None
-                result = 0
-                if len(self._queue) > 0:
-                    media = self._queue.pop(0)
-                    self._downloading = True
-
-                self._lock.release()
-                if media is not None:
-                    result = self._download(media)
-                self._lock.acquire()
-
+    async def _run(self):
+        while True:
+            try:
+                media = await self._queue.get()
+                self._downloading = True
+                
+                result = await self._download(media)
+                
+                self._queue.task_done()
                 self._downloading = False
-                # Nothing else to do then just wait.
-                if len(self._queue) == 0:
-                    self.vdebug(f"waiting for media")
-                    self._lock.wait(60.0)
-                # We downloaded a file so inject a small delay.
-                elif result == 1:
-                    self._lock.wait(0.5)
+                
+                if result == 1:
+                    await asyncio.sleep(0.5)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self._core.log.error(f"media-downloader error: {e}")
+                self._downloading = False
 
     def queue_download(self, media):
         if self._save_format == "":
             return
-        with self._lock:
-            self._queue.append(media)
-            if len(self._queue) == 1:
-                self._lock.notify()
+        self._queue.put_nowait(media)
 
     def stop(self):
-        if self._save_format == "":
-            return
-        with self._lock:
-            self._stopThread = True
-            self._lock.notify()
-        self.join(10)
+        if self._task:
+            self._task.cancel()
 
     @property
     def processing(self):
-        with self._lock:
-            return len(self._queue) > 0 or self._downloading
+        return not self._queue.empty() or self._downloading
 
     def debug(self, msg):
         self._core.log.debug(f"media-downloader: {msg}")
@@ -161,7 +150,6 @@ class ArloMediaLibrary:
         self._core = core
         self._objs = objs
 
-        self._lock = threading.Lock()
         self._load_cbs_ = []
         self._count = 0
         self._videos = []
@@ -169,8 +157,6 @@ class ArloMediaLibrary:
         self._snapshots = {}
 
         self._downloader = ArloMediaDownloader(core, self._core.cfg.save_media_to)
-        self._downloader.name = "ArloMediaDownloader"
-        self._downloader.daemon = True
         self._downloader.start()
 
     def __repr__(self):
@@ -264,8 +250,7 @@ class ArloMediaLibrary:
         self.debug("updating image library")
 
         # Get known videos.
-        with self._lock:
-            keys = self._video_keys
+        keys = self._video_keys
 
         # Get today's new videos.
         date_to = datetime.today().strftime("%Y%m%d")
@@ -275,16 +260,15 @@ class ArloMediaLibrary:
             return
 
         # Append the new videos.
-        with self._lock:
-            self._count += 1
-            self._videos = videos + self._videos
-            self._video_keys = keys
-            self._snapshots = snapshots
-            self.debug(f"update-count={self._count}, video-count={len(videos)}, snapshot-count={len(snapshots)}")
-            cbs = self._load_cbs_
-            self._load_cbs_ = []
+        self._count += 1
+        self._videos = videos + self._videos
+        self._video_keys = keys
+        self._snapshots = snapshots
+        self.debug(f"update-count={self._count}, video-count={len(videos)}, snapshot-count={len(snapshots)}")
+        cbs = self._load_cbs_
+        self._load_cbs_ = []
 
-        # run callbacks with no locks held
+        # run callbacks
         for cb in cbs:
             if asyncio.iscoroutinefunction(cb):
                 await cb()
@@ -307,41 +291,35 @@ class ArloMediaLibrary:
             return
 
         # Set the initial library values.
-        with self._lock:
-            self._count += 1
-            self._videos = videos
-            self._video_keys = keys
-            self._snapshots = snapshots
-            self.debug(f"load-count={self._count}, video-count={len(videos)}, snapshot-count={len(snapshots)}")
+        self._count += 1
+        self._videos = videos
+        self._video_keys = keys
+        self._snapshots = snapshots
+        self.debug(f"load-count={self._count}, video-count={len(videos)}, snapshot-count={len(snapshots)}")
 
     def snapshot_for(self, camera):
-        with self._lock:
-            return self._snapshots.get(camera.device_id, None)
+        return self._snapshots.get(camera.device_id, None)
 
     @property
     def videos(self):
-        with self._lock:
-            return self._count, self._videos
+        return self._count, self._videos
 
     @property
     def count(self):
-        with self._lock:
-            return self._count
+        return self._count
 
     def videos_for(self, camera):
         camera_videos = []
-        with self._lock:
-            for video in self._videos:
-                if camera.device_id == video.camera.device_id:
-                    camera_videos.append(video)
-            return self._count, camera_videos
+        for video in self._videos:
+            if camera.device_id == video.camera.device_id:
+                camera_videos.append(video)
+        return self._count, camera_videos
 
     def queue_update(self, cb):
-        with self._lock:
-            if not self._load_cbs_:
-                self.debug("queueing image library update")
-                self._core.bg.run_in(self.update, 2)
-            self._load_cbs_.append(cb)
+        if not self._load_cbs_:
+            self.debug("queueing image library update")
+            self._core.bg.run_in(self.update, 2)
+        self._load_cbs_.append(cb)
 
     def stop(self):
         self._downloader.stop()
@@ -433,8 +411,8 @@ class ArloMediaObject:
         """Returns the URL of the thumbnail image."""
         return self._attrs.get("presignedThumbnailUrl", None)
 
-    def download_thumbnail(self, filename=None):
-        return http_get(self.thumbnail_url, filename)
+    async def download_thumbnail(self, filename=None):
+        return await http_get_async(self.thumbnail_url, filename)
 
 
 class ArloVideo(ArloMediaObject):
@@ -467,8 +445,8 @@ class ArloVideo(ArloMediaObject):
         """Returns the URL of the video."""
         return self._attrs.get("presignedContentUrl", None)
 
-    def download_video(self, filename=None):
-        return http_get(self.video_url, filename)
+    async def download_video(self, filename=None):
+        return await http_get_async(self.video_url, filename)
 
     @property
     def stream_video(self):
