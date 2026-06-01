@@ -436,13 +436,12 @@ class PyArlo:
             self._started = True
             self._lock.notify_all()
 
-    async def stop(self, stop_backend=False, logout=True):
+    async def stop(self, logout=False):
         """Stop connection to Arlo and, optionally, logout."""
         self._core.st.save()
         self._core.bg.stop()
         self._objs.ml.stop()
-        if stop_backend:
-            await self._core.be.stop(logout=logout)
+        await self._core.be.stop(logout=logout)
 
     @property
     def entity_id(self):
