@@ -369,13 +369,13 @@ class PyArlo:
             await location.update_modes()
             await location.update_mode()
 
-    def _fast_refresh(self):
+    async def _fast_refresh(self):
         self.vdebug("fast refresh")
         self._core.bg.run(self._core.st.save)
         self._ping_bases()
 
         # See if the backend need to reconnect.
-        self._core.be.check_token()
+        await self._core.be.check_token()
 
         # do we need to reload the modes?
         if self._core.cfg.refresh_modes_every != 0:
@@ -414,7 +414,7 @@ class PyArlo:
             self._core.bg.run(self._objs.ml.load)
             self._core.bg.run(self._refresh_camera_media, wait=False)
 
-    def _slow_refresh(self):
+    async def _slow_refresh(self):
         self.vdebug("slow refresh")
         self._core.bg.run(self._refresh_bases, initial=False)
         self._core.bg.run(self._refresh_ambient_sensors)
@@ -436,13 +436,13 @@ class PyArlo:
             self._started = True
             self._lock.notify_all()
 
-    async def stop(self, stop_backend=False):
+    async def stop(self, stop_backend=False, logout=True):
         """Stop connection to Arlo and, optionally, logout."""
         self._core.st.save()
         self._core.bg.stop()
         self._objs.ml.stop()
         if stop_backend:
-            await self._core.be.stop()
+            await self._core.be.stop(logout=logout)
 
     @property
     def entity_id(self):
@@ -821,12 +821,3 @@ class PyArlo:
     def vdebug(self, msg: str) -> None:
         if self._core.log is not None:
             self._core.log.vdebug(msg)
-
-
-
-
-
-
-
-
-

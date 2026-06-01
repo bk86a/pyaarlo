@@ -9,6 +9,9 @@ import random
 import requests
 import ssl
 import traceback
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from enum import IntEnum
 from typing import Any, Union, Callable, List, Dict
 
@@ -21,7 +24,6 @@ from ...constant import (
 from ...utils.sseclient import SSEClient
 from ..cfg import ArloCfg
 from ..logger import ArloLogger
-from ..background import ArloBackground
 from .session import ArloSessionDetails
 
 
@@ -34,9 +36,9 @@ class _EventState(IntEnum):
 class _EventSession:
 
     def __init__(self, cfg: ArloCfg, log: ArloLogger, details: ArloSessionDetails,
-                 event_handler: Callable[[Any], None],
-                 connect_handler: Callable[[], Dict[str, Any]],
-                 reconnect_handler: Callable[[], None]) -> None:
+                 event_handler: Callable[[Any], Any],
+                 connect_handler: Callable[[], Any],
+                 reconnect_handler: Callable[[], Any]) -> None:
         self.cfg: ArloCfg = cfg
         self.log: ArloLogger = log
 
@@ -44,6 +46,56 @@ class _EventSession:
         self.event_handler: Any = event_handler
         self.connect_handler: Any = connect_handler
         self.reconnect_handler: Any = reconnect_handler
+
+        # Capture the loop we are running in
+        try:
+            self.loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.loop = None
+
+    def dispatch_event(self, response: Any):
+        """Dispatch event back to the async loop."""
+        if self.loop:
+            asyncio.run_coroutine_threadsafe(self._async_event_handler(response), self.loop)
+        else:
+            self.event_handler(response)
+
+    async def _async_event_handler(self, response: Any):
+        if asyncio.iscoroutinefunction(self.event_handler):
+            await self.event_handler(response)
+        else:
+            self.event_handler(response)
+
+    def dispatch_connect(self) -> Dict[str, Any]:
+        """Dispatch connect signal and wait for result (needed by MQTT)."""
+        if self.loop:
+            future = asyncio.run_coroutine_threadsafe(self._async_connect_handler(), self.loop)
+            try:
+                return future.result(timeout=30)
+            except Exception as e:
+                self.log.error(f"event: connect handler failed: {str(e)}")
+                return {"devices": []}
+        else:
+            return self.connect_handler()
+
+    async def _async_connect_handler(self):
+        if asyncio.iscoroutinefunction(self.connect_handler):
+            return await self.connect_handler()
+        else:
+            return self.connect_handler()
+
+    def dispatch_reconnect(self):
+        """Dispatch reconnect signal."""
+        if self.loop:
+            asyncio.run_coroutine_threadsafe(self._async_reconnect_handler(), self.loop)
+        else:
+            self.reconnect_handler()
+
+    async def _async_reconnect_handler(self):
+        if asyncio.iscoroutinefunction(self.reconnect_handler):
+            await self.reconnect_handler()
+        else:
+            self.reconnect_handler()
 
 
 class _MQTT:
@@ -83,7 +135,7 @@ class _MQTT:
         # Subscribing in on_connect() means that if we lose the connection and
         # reconnect then subscriptions will be renewed.
         self._debug(f"connected={str(rc)}")
-        connect_result = self._session.connect_handler()
+        connect_result = self._session.dispatch_connect()
         self._subscribe_basic()
         if "devices" in connect_result:
             self._subscribe_devices(connect_result["devices"])
@@ -98,12 +150,11 @@ class _MQTT:
 
             # deal with mqtt specific pieces
             if response.get("action", "") == "logout":
-                # Logged out? MQTT will log back in until stopped.
                 self._session.log.warning("logged out? did you log in from elsewhere?")
                 return
 
             # pass on to general handler
-            self._session.event_handler(response)
+            self._session.dispatch_event(response)
 
         except json.decoder.JSONDecodeError as e:
             self._debug("reopening: json error " + str(e))
@@ -197,14 +248,14 @@ class _SSE:
 
                 # stopped?
                 if event is None:
-                    self._debug("reopening: no event")
+                    self._debug("exiting: no event")
                     break
 
                 # dig out response
                 try:
                     response = json.loads(event.data)
                 except json.decoder.JSONDecodeError as e:
-                    self._debug("reopening: json error " + str(e))
+                    self._debug("exiting: json error " + str(e))
                     break
 
                 # deal with SSE specific pieces
@@ -215,12 +266,12 @@ class _SSE:
 
                 # connected - yay!
                 if response.get("status", "") == "connected":
-                    self._session.connect_handler()
+                    self._session.dispatch_connect()
                     continue
 
                 # pass on to general handler
                 self._debug("passing on packet")
-                self._session.event_handler(response)
+                self._session.dispatch_event(response)
 
         except requests.exceptions.ConnectionError:
             self._session.log.warning("event loop timeout")
@@ -247,12 +298,10 @@ class ArloEvent:
     user or (preferred) chosen by the Arlo servers.
     """
 
-    def __init__(self, cfg: ArloCfg, log: ArloLogger, bg: ArloBackground, details: ArloSessionDetails,
+    def __init__(self, cfg: ArloCfg, log: ArloLogger, details: ArloSessionDetails,
                  event_handler: Callable[[Any], None],
                  connect_handler: Callable[[], Dict[str, Any]],
                  reconnect_handler: Callable[[], None]):
-        self._bg: ArloBackground = bg
-
         self._session: _EventSession = _EventSession(cfg, log, details, event_handler, connect_handler, reconnect_handler)
         self._state: _EventState = _EventState.STARTING
         self._device: Union[_MQTT, _SSE, None] = None
@@ -261,7 +310,7 @@ class ArloEvent:
         self._session.log.debug(f"event: {msg}")
 
     def setup(self):
-        """Move instance into ready state.
+        """Move the instance into ready state.
 
         Pick the back end to use.
         """
@@ -278,7 +327,7 @@ class ArloEvent:
         # Ready to run.
         self._state = _EventState.READY
 
-    async def run(self):
+    def run(self):
         """Call the back end run function.
         """
         if self._state != _EventState.READY:
@@ -286,11 +335,9 @@ class ArloEvent:
             return
 
         self._state = _EventState.RUNNING
-        # Provider run methods might still be blocking, so we might need to run them in a thread
-        # until they are fully async.
-        await asyncio.get_running_loop().run_in_executor(None, self._device.run)
+        self._device.run()
 
-    async def stop(self):
+    def stop(self):
         """Ask the event stream to stop.
         """
         if self._state != _EventState.RUNNING:
@@ -298,7 +345,7 @@ class ArloEvent:
             return
 
         self._state = _EventState.STARTING
-        await asyncio.get_running_loop().run_in_executor(None, self._device.stop)
+        self._device.stop()
 
     async def update(self, **kwargs: Dict[str, Any]):
         """Update the event stream.
@@ -307,5 +354,127 @@ class ArloEvent:
             self._session.log.warning(f"event is not running in {self._state}")
             return
 
-        # This might need threading if it's blocking
-        await asyncio.get_running_loop().run_in_executor(None, lambda: self._device.update(**kwargs))
+        self._device.update(**kwargs)
+
+
+class ArloEventLoop:
+
+    def __init__(self, cfg: ArloCfg, log: ArloLogger, details: ArloSessionDetails,
+                 event_handler: Callable[[Any], None],
+                 connect_handler: Callable[[], Dict[str, Any]],
+                 reconnect_handler: Callable[[], None]):
+
+        self._session: _EventSession = _EventSession(cfg, log, details, event_handler, connect_handler, reconnect_handler)
+        self._state: _EventState = _EventState.STARTING
+        self._device: Union[_MQTT, _SSE, None] = None
+        self._executor: Union[ThreadPoolExecutor, None] = None
+
+        self._shutdown_requested = threading.Event()
+        self._restart_requested = threading.Event()
+
+        self._loop = asyncio.get_running_loop()
+
+    def _debug(self, msg):
+        self._session.log.debug(f"event-loop: {msg}")
+
+    async def start(self):
+        """Starts the resilient background thread loop."""
+
+        self._shutdown_requested.clear()
+        self._restart_requested.clear()
+
+        self._executor = ThreadPoolExecutor(max_workers=2)  # 2 workers to allow a killer thread
+
+        # Offload the supervisor loop
+        self._loop.run_in_executor(self._executor, self._resilient_thread_loop)
+
+    def _resilient_thread_loop(self):
+        """Runs entirely in the background thread."""
+        self._debug("Background Thread: Supervisor loop started.")
+
+        while not self._shutdown_requested.is_set():
+            try:
+                # Clear any lingering restart flags before connecting
+                self._restart_requested.clear()
+
+                self._debug(
+                    "Background Thread: Creating new client connection..."
+                )
+                # Pick stream type to use.
+                if self._session.cfg.event_backend == 'mqtt':
+                    self._device = _MQTT(self._session)
+                else:
+                    self._device = _SSE(self._session)
+                # self._current_client = sseclient.SSEClient(self.url)
+
+                self._device.run()
+                self._debug("Background Thread: run stopped.")
+
+            except Exception as e:
+                pass
+
+            # Determine WHY we crashed out of the read
+            if self._shutdown_requested.is_set():
+                self._debug(
+                    "Background Thread: Disconnect caused by stop request."
+                )
+                break
+
+            if self._restart_requested.is_set():
+                self._debug(
+                    "Background Thread: Disconnect caused by restart request. Reconnecting immediately..."
+                )
+                continue  # Skip the sleep backoff and jump straight to a fresh connection
+
+            self._debug(
+                f"Background Thread: Natural network issue ({e}). Retrying in 5s..."
+            )
+            time.sleep(5)
+
+        self._debug("Background Thread: Supervisor loop cleanly terminated.")
+
+    async def restart(self):
+        """Forces the current connection closed to trigger an immediate loop reset."""
+        if not self._executor or self._shutdown_requested.is_set():
+            return
+
+        self._debug("Main Loop: Restart requested. Forcing current connection closed...")
+        self._restart_requested.set()
+
+        # Fire off a quick, non-blocking killer thread to shatter the socket
+        if self._device:
+            self._loop.run_in_executor(
+                self._executor, self._device.stop
+            )
+
+    # def _force_close_socket(self, client_to_kill):
+    #     """Runs in a brief parallel thread to break the stuck read."""
+    #     try:
+    #         # Dig into the internal legacy object to find the raw socket wrapper
+    #         # Note: Depending on your specific library, this might be client_to_kill.resp.raw._fp.fp.raw._sock
+    #         # Or simpler: client_to_kill.resp.close() if using requests under the hood.
+    #         # Assuming standard requests-based sseclient:
+    #         if hasattr(client_to_kill, "resp") and client_to_kill.resp:
+    #             # Force close the raw underlying connection socket
+    #             client_to_kill.resp.close()
+    #         self._debug("Killer Thread: Connection successfully severed.")
+    #     except Exception as e:
+    #         self._debug(f"Killer Thread: Failed to force close socket: {e}")
+
+    async def stop(self):
+        """Triggers permanent shutdown."""
+        self._debug("Main Loop: testing shutdown...")
+        if self._executor:
+            self._debug("Main Loop: Initiating permanent shutdown...")
+            self._shutdown_requested.set()
+
+            # Trigger a connection kill so the thread breaks out of its current read immediately
+            if self._device:
+                self._loop.run_in_executor(
+                    self._executor, self._device.stop
+                )
+
+            self._executor.shutdown(wait=False)
+            self._executor = None
+            self._debug("Main Loop: Disconnected successfully.")
+

@@ -3,6 +3,7 @@ import http.client
 import re
 import time
 import warnings
+import socket
 
 import requests
 
@@ -55,10 +56,29 @@ class SSEClient:
         self._connect()
 
     def stop(self):
+        self.debug("stop called")
         self.running = False
+        if hasattr(self, 'resp') and self.resp:
+            raw_response = self.resp
+
+            # This navigates through urllib3 down to the actual python socket object
+            if hasattr(raw_response, 'raw') and raw_response.raw:
+                urllib3_connection = raw_response.raw._connection
+                if urllib3_connection and urllib3_connection.sock:
+                    raw_socket = urllib3_connection.sock
+
+                    # 2. THE MAGIC BULLET: Shatter the socket pipeline at the OS level
+                    # SHUT_RDWR tells the OS: "Stop reading and stop writing right now."
+                    raw_socket.shutdown(socket.SHUT_RDWR)
+
+                    # 3. Now close the wrapper safely
+                    raw_socket.close()
+
+            # Fallback to standard close just in case
+            raw_response.close()
 
     def disconnect(self):
-        self.running = False
+        self.stop()
 
     def _connect(self):
         if self.last_id:
@@ -103,8 +123,8 @@ class SSEClient:
                 self._connect()
 
                 # signal up!
-                if self.reconnect_cb:
-                    self.reconnect_cb()
+                # if self.reconnect_cb:
+                #     self.reconnect_cb()
 
                 # The SSE spec only supports resuming from a whole message, so
                 # if we have half a message we should throw it out.

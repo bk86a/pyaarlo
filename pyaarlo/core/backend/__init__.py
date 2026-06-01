@@ -69,7 +69,7 @@ class _EventDetails:
     """
     def __init__(self):
         self.loop_exiting: bool = False
-        self.loop_thread: Union[threading.Thread, None] = None
+        self.loop_task = Union[asyncio.Task, None]
         self.stream: Union[ArloEvent, None] = None
         self.stream_connected: bool = False
 
@@ -278,7 +278,7 @@ class ArloBackEnd:
                         req["response"] = response
                         req["event"].set()
 
-    def _event_response_handler(self, response):
+    async def _event_response_handler(self, response):
 
         # Debugging.
         if self._dump_file is not None:
@@ -297,51 +297,27 @@ class ArloBackEnd:
         self._event_run_callbacks(response)
         
         # Notify any waiting post() calls.
-        # Use call_soon_threadsafe as this might be called from MQTT/SSE thread
-        try:
-            loop = asyncio.get_running_loop()
-            loop.call_soon_threadsafe(self._event_notify_waiting, response)
-        except RuntimeError:
-            if self._bg._loop:
-                self._bg._loop.call_soon_threadsafe(self._event_notify_waiting, response)
+        self._event_notify_waiting(response)
 
-    def _event_connected_handler(self):
+    async def _event_connected_handler(self):
         self._event.stream_connected = True
         self._debug("event connected")
-        # Devices refresh is now async. Since we're in a background thread (MQTT/SSE),
-        # we can bridge to the loop.
-        try:
-            if self._bg._loop:
-                devices = asyncio.run_coroutine_threadsafe(self.devices(), self._bg._loop).result(timeout=30)
-                return {"devices": devices}
-        except Exception as e:
-            self._debug(f"failed to get devices in connected handler: {str(e)}")
-        return {
-            "devices": []
-        }
+        devices = await self.devices()
+        return {"devices": devices}
 
-    def _event_reconnected_handler(self):
+    async def _event_reconnected_handler(self):
         self._debug("event re-connected")
 
     async def _event_reconnect(self):
-        await self._event.stream.stop()
+        self._event.stream.stop()
 
-    def _event_loop_stop(self):
+    async def _event_loop_stop(self):
         self._event.loop_exiting = True
 
-    def _event_loop(self):
+    async def _event_loop(self):
         """The event stream loop.
-
-        This is run inside its own thread.
         """
-        self._debug("re-logging in")
-
-        # Create a loop for this thread if it doesn't have one
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        self._debug("starting event loop")
 
         while not self._event.loop_exiting:
 
@@ -354,17 +330,29 @@ class ArloBackEnd:
             # login again if not first iteration, this will also create a new session
             login_count = 0
             wait_time = 5
-            while not self._logged_in:
-                time.sleep(wait_time)
+            while not self._logged_in and not self._event.loop_exiting:
                 # While testing; hold off for an hour if too many failures.
                 if login_count > 3:
                     wait_time = 360
+                
                 self._debug(f"re-logging in with time={wait_time}")
+
                 # We have to run the async login in the loop
-                self._logged_in = loop.run_until_complete(self._login()) and loop.run_until_complete(self._session_finalize())
+                self._logged_in = await self._login() and await self._session_finalize()
+
+                if not self._logged_in and not self._event.loop_exiting:
+                    # Sleep in small chunks to be interruptible
+                    for _ in range(wait_time):
+                        if self._event.loop_exiting:
+                            break
+                        await asyncio.sleep(1)
+                    login_count += 1
+
+            if self._event.loop_exiting:
+                break
 
             self._debug("starting event device")
-            loop.run_until_complete(self._event.stream.run())
+            await asyncio.to_thread(self._event.stream.run)
             self._debug("exited event device")
 
             # clear down and signal out
@@ -936,19 +924,14 @@ class ArloBackEnd:
 
     async def start(self):
         # Build event details...
-        self._event.stream = ArloEvent(self._cfg, self._log, self._bg, self._req.details,
+        self._event.stream = ArloEvent(self._cfg, self._log, self._req.details,
                                        self._event_response_handler,
                                        self._event_connected_handler,
                                        self._event_reconnected_handler)
         self._event.stream.setup()
-
         self._event.stream_connected = False
-        self._event.loop_thread = threading.Thread(
-            name="ArloEventStream", target=self._event_loop, args=()
-        )
-        self._event.loop_thread.daemon = True
+        self._event.loop_task = asyncio.create_task(self._event_loop())
 
-        self._event.loop_thread.start()
         count = 0
         while not self._event.stream_connected and count < 30:
             self._debug("waiting for stream up")
@@ -963,14 +946,19 @@ class ArloBackEnd:
     def is_connected(self):
         return self._logged_in
 
-    async def stop(self):
+    async def stop(self, logout: bool=True):
         self._debug("trying to stop")
-        self._event_loop_stop()
-        if self._event.stream is not None:
-            await self._event.stream.stop()
-        await self.put(LOGOUT_PATH)
 
-    def check_token(self):
+        await self._event_loop_stop()
+        if self._event.stream is not None:
+            self._event.stream.stop()
+        if self._event.loop_task:
+            await self._event.loop_task
+
+        if logout:
+            await self.put(LOGOUT_PATH)
+
+    async def check_token(self):
         """See if the token nearing its timeout.
 
         If so, restart the event loop.
@@ -979,7 +967,7 @@ class ArloBackEnd:
         self._vdebug(f"check-token: now={int(time.time())}, expires={int(self._req.details.token_expires_in - 300)}")
         if self._req.details.token_expires_in - 300 < time.time():
             self._debug(f"check-token: token is expiring in {remaining} seconds, reconnecting")
-            self._event_reconnect()
+            await self._event_reconnect()
         self._debug(f"check-token: token still good for {remaining} seconds")
 
     async def notify(self, device_id, xcloud_id, body, timeout=None, wait_for=None):
@@ -1130,8 +1118,3 @@ class ArloBackEnd:
 
     def ev_inject(self, response):
         self._event_run_callbacks(response)
-
-
-
-
-

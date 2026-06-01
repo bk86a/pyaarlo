@@ -235,7 +235,7 @@ class ArloMediaLibrary:
             # snapshots, use first found
             if video.get("reason", "") == "snapshot":
                 if camera.device_id not in snapshots:
-                    self.debug(f"adding snapshot for {camera.name}")
+                    self.vdebug(f"adding snapshot for {camera.name}")
                     snapshots[camera.device_id] = self._create_snapshot(
                         video, camera
                     )
@@ -251,7 +251,7 @@ class ArloMediaLibrary:
                 if key in keys:
                     self.vdebug(f"skipping {key} for {camera.name}")
                     continue
-                self.debug(f"adding {key} for {camera.name}")
+                self.vdebug(f"adding {key} for {camera.name}")
                 video = self._create_video(video, camera,)
                 videos.append(video)
                 self._downloader.queue_download(video)

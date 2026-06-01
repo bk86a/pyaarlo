@@ -78,7 +78,7 @@ class ArloObject:
         if value != self._load(attr):
             self._save(attr, value)
             self._do_callbacks(attr, value)
-            self.debug(f"{attr}: NEW {str(value)[:80]}")
+            self.vdebug(f"{attr}: NEW {str(value)[:80]}")
         else:
             self.vdebug(f"{attr}: OLD {str(value)[:80]}")
 

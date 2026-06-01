@@ -84,7 +84,7 @@ class ArloStorage:
     def set(self, key, value, prefix=""):
         ekey = self._ekey(key)
         output = "set:" + ekey + "=" + str(value)
-        self._log.debug(f"{prefix}: {output[:80]}")
+        self._log.vdebug(f"{prefix}: {output[:80]}")
         with self._lock:
             self._db[ekey] = value
             return value
