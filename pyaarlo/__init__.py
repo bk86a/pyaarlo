@@ -40,7 +40,7 @@ from .types import ArloTypes
 from .utils import time_to_arlotime
 
 
-__version__ = "0.8.0.18"
+__version__ = "0.9.0-alpha.1"
 
 
 class PyArlo:

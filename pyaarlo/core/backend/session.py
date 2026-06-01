@@ -6,10 +6,9 @@ import pprint
 import uuid
 import threading
 import traceback
-import cloudscraper
 
 from http.cookiejar import LWPCookieJar
-from typing import Dict, Union
+from typing import Dict, Union, Any
 
 from ...constant import (
     ORIGIN_HOST,
@@ -46,7 +45,7 @@ class ArloSessionDetails:
         self.auth_headers: Dict[str, str] = {}
     
         # Connection Objects.
-        self.connection: Union[cloudscraper.CloudScraper, None] = None
+        self.connection: Any = None
         self.cookies: Union[LWPCookieJar, None] = None
 
 

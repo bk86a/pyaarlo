@@ -649,22 +649,35 @@ class ArloBackEnd:
         """
 
         while True:
-            # We still have a curve to try? Grab a connection using it.
-            if self._auth.curves:
-                curve = self._auth.curves.pop(0)
-                self._debug(f"auth: CloudFlare curve set to: {curve}")
-                self._req.details.connection = cloudscraper.create_scraper(
-                    # browser={
-                    #     'browser': 'chrome',
-                    #     'platform': 'darwin',
-                    #     'desktop': True,
-                    #     'mobile': False,
-                    # },
-                    disableCloudflareV1=True,
-                    ecdhCurve=curve,
-                    debug=False,
-                )
-                return True
+            # Check for curl_cffi override first
+            if self._cfg.http_backend == "curl_cffi":
+                # We only need to try curl_cffi once per attempt loop.
+                # If we're at attempt > 1 but we haven't exhausted curves, we skip this branch
+                # so we can manage the attempt counter correctly, or we can just try it 3 times.
+                
+                # To align with how cloudscraper tries N curves per attempt,
+                # we'll just try curl_cffi once per attempt.
+                if self._auth.curves:
+                    # Dummy clear of curves to indicate we tried this attempt
+                    self._auth.curves = []
+                    
+                    self._debug("auth: using curl_cffi backend")
+                    from curl_cffi import requests as cffi_requests
+                    self._req.details.connection = cffi_requests.Session(impersonate=self._cfg.curl_cffi_impersonate)
+                    return True
+
+            else:
+                # We still have a curve to try? Grab a connection using it.
+                if self._auth.curves:
+                    curve = self._auth.curves.pop(0)
+                    self._debug(f"auth: CloudFlare curve set to: {curve}")
+                    import cloudscraper
+                    self._req.details.connection = cloudscraper.create_scraper(
+                        disableCloudflareV1=True,
+                        ecdhCurve=curve,
+                        debug=False,
+                    )
+                    return True
 
             # Do we still have attempts left? Refill the curves and try the
             # next one.

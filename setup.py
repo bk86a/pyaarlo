@@ -11,16 +11,17 @@ def readme():
 setup(
 
     name='pyaarlo',
-    version='0.8.0.18',
+    version='0.9.0-alpha.1',
     packages=['pyaarlo'],
 
-    python_requires='>=3.7',
+    python_requires='>=3.9',
     install_requires=[
         'requests',
         'click',
         'pycryptodome',
         'unidecode',
         'cloudscraper>=1.2.71',
+        'curl_cffi>=0.5.10',
         'paho-mqtt',
         'cryptography',
         'python-slugify'
@@ -51,10 +52,10 @@ setup(
         'License :: OSI Approved :: GNU Lesser General Public License v3 or later (LGPLv3+)',
         'Operating System :: OS Independent',
         'Programming Language :: Python',
-        'Programming Language :: Python :: 3.6',
-        'Programming Language :: Python :: 3.7',
-        'Programming Language :: Python :: 3.8',
         'Programming Language :: Python :: 3.9',
+        'Programming Language :: Python :: 3.10',
+        'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12',
         'Topic :: Software Development :: Libraries :: Python Modules'
     ],
 
