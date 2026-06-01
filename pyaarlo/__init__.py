@@ -359,6 +359,8 @@ class PyArlo:
             await base.update_modes(initial)
             await base.keep_ratls_open()
             await base.update_states()
+        for location in self._objs.locations:
+            await location.update_modes(initial)
 
     async def _refresh_modes(self):
         self.vdebug("refresh modes")
